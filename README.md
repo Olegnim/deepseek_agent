@@ -13,11 +13,12 @@ CLI-агент на Python для написания и правки кода (*
 ├── agent.config.json         # настройки агента (шаблон для git, без секретов)
 ├── mcp_integration.py        # клиент MCP-серверов
 ├── skills_loader.py          # загрузка навыков
-├── tools/                    # filesystem, shell, linter, git, web, cache, snapshot, stack, loop_guard
+├── tools/                    # filesystem, shell, linter, git, web, vscode, cache, snapshot, stack, loop_guard
 ├── skills/                   # встроенные навыки (project-навыки подхватятся отдельно)
 ├── plugins/                  # (опционально) доп. модули
 ├── .agent.config.json        # ЛОКАЛЬНЫЙ оверрайд и секреты (в git не попадает)
 ├── .vscode/tasks.json        # готовые задачи VS Code
+├── vscode-extension/         # расширение-мост: агент открывает файлы прямо в VS Code
 └── mcp_config.json           # MCP-серверы (пути — через ${project_root})
 ```
 
@@ -113,6 +114,7 @@ python -m pip install -r "<AGENT_HOME>/requirements.txt"
 | `:skills` | Загруженные навыки |
 | `:profile [имя]` / `:profiles` | Активный профиль / переключить / список профилей |
 | `:mcp` | Статус MCP-серверов |
+| `:vscode` | Статус моста к VS Code (открытие файлов в редакторе) |
 | `:snapshots` / `:restore` | Список снапшотов / откатить последний |
 | `:cache` / `:cache clear` | Объём кэша и очистка / очистить сразу |
 | `:tokens` / `:context` / `:log` | Токены / размер контекста / путь к логу сессии |
@@ -131,8 +133,16 @@ python -m pip install -r "<AGENT_HOME>/requirements.txt"
 | `run_shell` | Shell-команды (`php -l`, `node --check`, `pytest`); таймаут — `tools.shell_timeout` |
 | `git_status`, `git_diff`, `git_log` | Состояние репозитория (только чтение) |
 | `web_search`, `fetch_url` | Поиск (DuckDuckGo) и чтение страниц без API-ключей |
+| `vscode_open`, `vscode_close`, `vscode_close_all` | Открыть файл в новой вкладке VS Code / закрыть вкладку / закрыть все вкладки агента |
+| `vscode_reveal`, `vscode_diff`, `vscode_status` | Показать файл в проводнике / дифф со снапшотом / статус моста |
 
 **Автолинт:** после `write_file`/`edit_file` агент сам проверяет синтаксис по правилам из секции `lint` (`php -l`, `node --check`, `python -m py_compile`, `javac`, `kotlinc`, `swiftc`) и добавляет результат к ответу. Утилита не найдена или правила нет — шаг пропускается. Отключить: `"lint": { "enabled": false }`.
+
+**Работа в VS Code (`vscode`):** если установлено расширение из `vscode-extension/`, агент открывает правленые файлы в новых вкладках, умеет их закрывать, показывать в проводнике и открывать дифф со снапшотом — работу агента видно прямо в редакторе. Расширение поднимает мост на `127.0.0.1` и пишет порт с токеном в `.agent-cache/vscode-bridge.json`.
+
+Интеграция **необязательная и отказоустойчивая**: если VS Code не запущен, расширение не установлено, файл-дескриптор битый или мост не отвечает — инструменты `vscode_*` просто не показываются модели, авто-открытие пропускается, агент работает как обычно. Никаких исключений и зависаний; принудительно выключается через `"vscode": { "enabled": false }`.
+
+Установка расширения — [`vscode-extension/README.md`](vscode-extension/README.md) (Windows / Linux / macOS). Настройки — секция `vscode`: `enabled`, `auto_open`, `auto_close_previous`, `timeout`.
 
 **Кэш (`.agent-cache`):** внутри проекта лежат снапшоты (`backups/`), логи (`logs/`) и история (`history.txt`). В git не попадает; чистится через `:cache clear` или `--clear-cache`.
 

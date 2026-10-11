@@ -1,0 +1,6 @@
+.vscode/**
+node_modules/**
+*.vsix
+selftest.js
+robustness_check.py
+.gitignore

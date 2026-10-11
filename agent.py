@@ -91,8 +91,9 @@ from config import (
     agent_instructions as config_agent_instructions,
     lint_settings as config_lint_settings,
 )
-from tools import TOOLS, REGISTRY, WEB_TOOLS, GIT_TOOLS, PATH_TOOLS
+from tools import TOOLS, REGISTRY, WEB_TOOLS, GIT_TOOLS, PATH_TOOLS, VSCODE_TOOLS
 from tools import linter, loop_guard
+from tools import vscode as vscode_tools
 from tools.filesystem import project_outline
 from tools.stack import stack_summary, detect_tags
 from tools.cache import cache_overview, clear_cache, format_overview, human_size
@@ -391,6 +392,14 @@ def build_system_prompt() -> str:
             "для проверки версий, синтаксиса библиотек и сообщений об ошибках;"
         )
 
+    vscode_info = ""
+    if vscode_tools.available():
+        vscode_info = (
+            "\n- открывать и закрывать файлы в редакторе VS Code "
+            "(vscode_open, vscode_close, vscode_diff) — пользователь видит "
+            "в отдельных вкладках, с какими файлами ты работаешь;"
+        )
+
     lint_info = ""
     lint_hints = ""
     if linter.lint_enabled():
@@ -453,7 +462,7 @@ def build_system_prompt() -> str:
 - читать, писать и точечно редактировать файлы;
 - искать по коду регулярными выражениями;
 - запускать shell-команды (тесты, сборка, линтеры);
-- смотреть состояние репозитория: git_status, git_diff, git_log;{web_info}
+- смотреть состояние репозитория: git_status, git_diff, git_log;{web_info}{vscode_info}
 - использовать инструменты MCP-серверов, если они подключены;
 - следовать правилам навыков (skills), описанных ниже.
 {mcp_info}{snapshot_info}{lint_info}
@@ -508,6 +517,7 @@ def build_tools_list() -> list[dict]:
 
     web_on = bool(config_web_settings().get("enabled", True))
     git_on = (PROJECT_ROOT / ".git").exists()
+    vscode_on = vscode_tools.available()
 
     seen: set[str] = set()
     deduped: list[dict] = []
@@ -520,6 +530,8 @@ def build_tools_list() -> list[dict]:
         if not web_on and name in WEB_TOOLS:
             continue
         if not git_on and name in GIT_TOOLS:
+            continue
+        if not vscode_on and name in VSCODE_TOOLS:
             continue
         seen.add(name)
         deduped.append(tool)
@@ -556,6 +568,36 @@ def log_line(kind: str, text: str) -> None:
 
 # ---------- Выполнение инструментов ----------
 
+# Правки, после которых файл автоматически показывается в VS Code.
+VSCODE_EDIT_TOOLS = {
+    "write_file", "edit_file",
+    "filesystem__write_file", "filesystem__edit_file",
+}
+
+
+def _auto_open_in_vscode(name: str, args: dict, result: str) -> str:
+    """Открывает правленый файл в VS Code — видно, как агент работает.
+
+    Работает, только если запущено расширение-мост (vscode-extension/) и
+    vscode.auto_open не выключен. Ошибки открытия молча игнорируются, чтобы
+    интеграция не мешала основной работе.
+    """
+    if name not in VSCODE_EDIT_TOOLS:
+        return result
+    if not result or result.startswith("ERROR"):
+        return result
+    path = args.get("path")
+    if not path:
+        return result
+    try:
+        note = vscode_tools.auto_open(str(path))
+    except Exception:  # noqa: BLE001 — автооткрытие не должно ронять инструмент
+        note = ""
+    if note:
+        log_line("vscode", note)
+    return f"{result}\n{note}" if note else result
+
+
 async def execute_tool(name: str, args: dict) -> str:
     # ---- Встроенные инструменты ----
     if name in REGISTRY:
@@ -583,7 +625,9 @@ async def execute_tool(name: str, args: dict) -> str:
             return f"ERROR: {type(e).__name__}: {e}"
 
         # Автолинт: после правки файла сразу проверяем синтаксис.
-        return linter.lint_result(name, args, result)
+        result = linter.lint_result(name, args, result)
+        # Автооткрытие правленого файла в VS Code (если запущено расширение-мост).
+        return _auto_open_in_vscode(name, args, result)
 
     # ---- MCP-инструменты ----
     if mcp_manager and mcp_manager.has_tool(name):
@@ -592,7 +636,8 @@ async def execute_tool(name: str, args: dict) -> str:
             make_snapshot(name, args)
         if name in DANGEROUS_TOOLS and not confirm(name, args):
             return "Пользователь отклонил выполнение."
-        return await mcp_manager.call_tool(name, args)
+        mcp_result = await mcp_manager.call_tool(name, args)
+        return _auto_open_in_vscode(name, args, mcp_result)
 
     return f"ERROR: неизвестный инструмент {name}"
 
@@ -821,12 +866,13 @@ def cmd_help() -> None:
   [cyan]:clear[/cyan]             — очистить историю диалога
   [cyan]:tokens[/cyan]            — статистика токенов за сессию
   [cyan]:context[/cyan]           — размер текущего контекста
-  [cyan]:tools[/cyan]             — доступные инструменты (вкл. web и git)
+  [cyan]:tools[/cyan]             — доступные инструменты (вкл. web, git, vscode)
   [cyan]:lint [файл][/cyan]      — прогнать автолинт (php -l / node --check / ...)
   [cyan]:profile [имя][/cyan]    — показать/сменить профиль (php, python, ...)
   [cyan]:profiles[/cyan]         — список профилей (ролей) агента
   [cyan]:skills[/cyan]            — загруженные навыки
   [cyan]:mcp[/cyan]               — статус MCP-серверов
+  [cyan]:vscode[/cyan]            — статус моста к VS Code (открытие файлов в редакторе)
   [cyan]:snapshots[/cyan]         — список снапшотов
   [cyan]:restore[/cyan]           — восстановить последний снапшот
   [cyan]:auto[/cyan]              — переключить режим подтверждений
@@ -1054,6 +1100,34 @@ def cmd_mcp() -> None:
         ui_print(f"[bold]{srv}[/bold]: {len(tools)} инструментов", style="cyan")
 
 
+def cmd_vscode() -> None:
+    """Статус моста к VS Code (расширение vscode-extension/)."""
+    settings = app_config.vscode_settings()
+    if not settings.get("enabled", True):
+        ui_info("Интеграция с VS Code выключена (vscode.enabled = false).")
+        return
+
+    info = vscode_tools.bridge_info(PROJECT_ROOT)
+    if not info:
+        ui_error("Мост к VS Code не найден — расширение не запущено.")
+        ui_info("Установите расширение из папки vscode-extension/ "
+                "(см. vscode-extension/README.md) и откройте проект в VS Code.")
+        ui_info(f"Ожидается файл: {vscode_tools.bridge_file(PROJECT_ROOT)}")
+        return
+
+    if not vscode_tools.available(force=True):
+        ui_error("Файл моста есть, но VS Code не отвечает — похоже, редактор "
+                 "был закрыт аварийно.")
+        ui_info("Перезапустите VS Code: расширение пересоздаст "
+                f"{vscode_tools.bridge_file(PROJECT_ROOT).name}.")
+        return
+
+    ui_print(f"[green]✓[/green] мост активен: 127.0.0.1:{info.get('port')}")
+    ui_print(f"    проект:  {info.get('workspace')}", style="dim")
+    ui_info(f"авто-открытие правок: "
+            f"{'вкл' if settings.get('auto_open', True) else 'выкл'}")
+
+
 def cmd_snapshots() -> None:
     """Показывает список снапшотов (каталог — из agent.config.json)."""
     backup = backup_dir(PROJECT_ROOT)
@@ -1219,6 +1293,30 @@ def cmd_doctor() -> None:
         ui_print("  ~ конфиг есть, но ни один сервер не подключён", style="yellow")
     print()
 
+    ui_print("[bold]VS Code[/bold]")
+    vscode_cfg = app_config.vscode_settings()
+    if not vscode_cfg.get("enabled", True):
+        ui_print("  ~ интеграция выключена (vscode.enabled = false)", style="yellow")
+    else:
+        vscode_bridge = vscode_tools.bridge_info(PROJECT_ROOT)
+        if vscode_bridge and vscode_tools.available(force=True):
+            ui_print(f"  ✓ мост активен: 127.0.0.1:{vscode_bridge.get('port')}")
+            ui_print(f"      проект: {vscode_bridge.get('workspace')}", style="dim")
+            ui_print(f"      авто-открытие правок: "
+                     f"{'вкл' if vscode_cfg.get('auto_open', True) else 'выкл'}",
+                     style="dim")
+        elif vscode_bridge:
+            ui_print("  ~ файл моста есть, но VS Code не отвечает "
+                     "(закрыт аварийно?)", style="yellow")
+            ui_print("      → перезапустите VS Code", style="yellow")
+        else:
+            ui_print("  ✗ мост не найден (расширение vscode-extension/)", style="dim")
+            ui_print(f"      ожидается {vscode_tools.bridge_file(PROJECT_ROOT)}",
+                     style="dim")
+            ui_print("      → установите расширение: vscode-extension/README.md",
+                     style="yellow")
+    print()
+
     ui_print("[bold]Снапшоты[/bold]")
     if HAS_SNAPSHOT:
         backup = backup_dir(PROJECT_ROOT)
@@ -1324,6 +1422,8 @@ async def handle_command(cmd: str, messages: list) -> bool:
         cmd_profiles()
     elif c == ":mcp":
         cmd_mcp()
+    elif c == ":vscode":
+        cmd_vscode()
     elif c == ":snapshots":
         cmd_snapshots()
     elif c == ":restore":

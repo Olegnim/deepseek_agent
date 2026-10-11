@@ -169,6 +169,20 @@ DEFAULTS: dict = {
             "results": 5,         # сколько результатов поиска возвращать
         },
     },
+    # Мост к расширению VS Code (vscode-extension/): агент открывает и закрывает
+    # файлы прямо в редакторе, поэтому видно, с чем он работает. Расширение
+    # поднимает локальный HTTP-сервер на 127.0.0.1 и пишет порт с токеном в
+    # <project>/.agent-cache/vscode-bridge.json.
+    "vscode": {
+        # Выключено — инструменты vscode_* не показываются модели вообще.
+        "enabled": True,
+        # Открывать правленный файл в редакторе после write_file / edit_file.
+        "auto_open": True,
+        # Перед открытием нового файла закрывать вкладку, открытую агентом ранее.
+        "auto_close_previous": False,
+        # Таймаут HTTP-запроса к мосту, секунды.
+        "timeout": 5,
+    },
 }
 
 _VAR_RE = re.compile(r"\$\{([^{}]+)\}")
@@ -349,7 +363,7 @@ def setup(cli_project_root: str | None = None) -> Path:
     передан флаг -p или нужен свежий расчёт после смены cwd).
     """
     global SETTINGS, API, PATHS, SNAPSHOTS, CACHE, AGENT_CFG, TOOLS_CFG, WEB, LINT
-    global PROFILES, LOOP_GUARD
+    global PROFILES, LOOP_GUARD, VSCODE
     global PROJECT_ROOT, LOADED_CONFIGS
     global API_KEY, BASE_URL, MODEL, TEMPERATURE, CONTEXT_LIMIT, MAX_BACKUPS
     global MAX_STEPS, API_RETRIES, SHELL_TIMEOUT
@@ -393,6 +407,8 @@ def setup(cli_project_root: str | None = None) -> Path:
     AGENT_CFG = merged.get("agent", {})
     TOOLS_CFG = merged.get("tools", {})
     WEB = deep_merge(DEFAULTS["tools"]["web"], TOOLS_CFG.get("web") or {})
+    # Интеграция с редактором VS Code (секция "vscode" верхнего уровня).
+    VSCODE = deep_merge(DEFAULTS["vscode"], merged.get("vscode") or {})
     # Автолинтер: секция "lint" верхнего уровня или tools.lint (оба варианта).
     LINT = deep_merge(
         DEFAULTS["lint"],
@@ -453,6 +469,7 @@ CACHE: dict = {}
 AGENT_CFG: dict = {}
 TOOLS_CFG: dict = {}
 WEB: dict = {}
+VSCODE: dict = {}
 LINT: dict = {}
 PROFILES: dict = {}
 LOOP_GUARD: dict = {}
@@ -681,6 +698,11 @@ def web_settings() -> dict:
     return WEB
 
 
+def vscode_settings() -> dict:
+    """Настройки моста к расширению VS Code (секция "vscode")."""
+    return VSCODE
+
+
 def agent_home_path() -> Path:
     """Псевдоним agent_home() для ясности в новых модулях."""
     return AGENT_HOME
@@ -756,6 +778,8 @@ def settings_summary() -> str:
         f"({len(LINT.get('rules') or [])} правил, таймаут {LINT.get('timeout')} c)",
         f"web:           {'вкл' if WEB.get('enabled', True) else 'выкл'} "
         f"(timeout {WEB.get('timeout')} c, лимит {WEB.get('max_chars')} симв.)",
+        f"vscode:        {'вкл' if VSCODE.get('enabled', True) else 'выкл'} "
+        f"(авто-открытие правок: {'да' if VSCODE.get('auto_open', True) else 'нет'})",
     ]
     plugins = plugins_candidates()
     if plugins:

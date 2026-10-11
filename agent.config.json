@@ -78,5 +78,12 @@
       "max_chars": 20000,
       "results": 5
     }
+  },
+  "vscode": {
+    "_readme": "Мост к расширению VS Code (папка vscode-extension/): агент открывает и закрывает файлы прямо в редакторе, поэтому видно, с чем он работает. Расширение пишет порт и токен в .agent-cache/vscode-bridge.json; если оно не запущено, инструменты vscode_* просто не показываются модели.",
+    "enabled": true,
+    "auto_open": true,
+    "auto_close_previous": false,
+    "timeout": 5
   }
 }

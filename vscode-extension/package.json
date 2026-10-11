@@ -1,0 +1,58 @@
+{
+  "name": "deepseek-agent-bridge",
+  "displayName": "DeepSeek Agent Bridge",
+  "description": "Мост между CLI-агентом DeepSeek и VS Code: агент открывает и закрывает файлы в редакторе в отдельных вкладках, показывает их в проводнике и открывает диффы — видно, как он работает с проектом.",
+  "version": "0.1.0",
+  "publisher": "deepseek-agent",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "deepseek",
+    "agent",
+    "bridge",
+    "automation"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "deepseekAgent.showStatus",
+        "title": "DeepSeek Agent: статус моста"
+      },
+      {
+        "command": "deepseekAgent.closeAgentTabs",
+        "title": "DeepSeek Agent: закрыть вкладки агента"
+      },
+      {
+        "command": "deepseekAgent.restartBridge",
+        "title": "DeepSeek Agent: перезапустить мост"
+      }
+    ],
+    "configuration": {
+      "title": "DeepSeek Agent Bridge",
+      "properties": {
+        "deepseekAgent.port": {
+          "type": "number",
+          "default": 0,
+          "description": "Порт локального моста. 0 — выбрать свободный автоматически (рекомендуется)."
+        },
+        "deepseekAgent.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Адрес прослушивания. Меняйте только осознанно: мост доступен без шифрования."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "npx --yes @vscode/vsce package"
+  }
+}

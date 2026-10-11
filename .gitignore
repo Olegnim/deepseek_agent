@@ -224,6 +224,9 @@ mcp_config.local.json
 node_modules/
 .npm/
 
+# VS Code: собранные .vsix расширения-моста
+*.vsix
+
 # PHP
 vendor/
 composer.phar
