@@ -12,7 +12,7 @@ MAX_GREP_RESULTS = 300            # сколько совпадений возв
 MAX_READ_RANGE_LINES = 500        # максимум строк за один read_range
 
 # Расширения, по которым ищет grep по умолчанию.
-# Покрывает PHP, Python, JS/TS, шаблоны, стили, конфиги.
+# Покрывает PHP, Python, JS/TS, Java/Kotlin, Swift, шаблоны, стили, конфиги.
 CODE_EXTENSIONS = (
     # PHP
     ".php", ".phtml", ".php3", ".php4", ".php5", ".phps",
@@ -20,6 +20,10 @@ CODE_EXTENSIONS = (
     ".py", ".pyi",
     # JS / TS
     ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts",
+    # Java / Kotlin / JVM
+    ".java", ".kt", ".kts", ".gradle", ".gradle.kts",
+    # Swift / Objective-C
+    ".swift", ".m", ".mm", ".h",
     # HTML / шаблоны
     ".html", ".htm", ".xhtml",
     ".twig", ".tpl", ".mustache", ".hbs", ".ejs",
@@ -232,6 +236,7 @@ def grep(pattern: str, path: str = ".", include: str = "") -> str:
                 ".git", "node_modules", "vendor", "__pycache__",
                 ".venv", "venv", ".agent-cache", ".idea", ".vscode",
                 "dist", "build", ".next", ".cache",
+                "target", ".gradle", "Pods", "DerivedData",
             }
         ]
         for fn in filenames:

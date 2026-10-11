@@ -18,3 +18,6 @@ applies_to: [python, py, django, flask, fastapi, aiohttp]
   `shell=True`) — используй параметры и списки аргументов.
 - Синтаксис проверяется автолинтом (`python -m py_compile`); тесты —
   `python -m pytest`, если в проекте есть `pytest`.
+- Форматирование и линт — `ruff` (или black + flake8), типы — `mypy`/`pyright`.
+- Публичный API документируй docstring (PEP 257).
+- Секреты — из окружения (`os.environ`), не в коде и не в репозитории.

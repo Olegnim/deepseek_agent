@@ -221,6 +221,9 @@ Git (только чтение, коммиты — за человеком):
 - правила задаются в `agent.config.json` (секция `lint`): расширение → команда,
   в команду подставляется `{file}` (путь в кавычках). Если правило не подходит
   или утилиты нет в PATH, шаг молча пропускается;
+- по умолчанию настроены: `php -l`, `node --check`, `python -m py_compile`,
+  `javac -proc:only` (Java, только разбор — без `.class`), `kotlinc` (Kotlin;
+  вывод в `.agent-cache/lint-kotlin`), `swiftc -parse` (Swift, без типизации);
 - проверку можно запустить вручную: `:lint путь/к/файлу`, а `:lint` без
   аргумента покажет список настроенных проверок;
 - примеры команд проверки в системном промпте **генерируются из этих же правил**,
@@ -253,6 +256,13 @@ python "<AGENT_HOME>\agent.py" --profile python           # ...или Python-р�
 Внутри сессии: `:profile` — показать активный, `:profile php` — переключить
 (промпт пересобирается на ходу), `:profile auto` — вернуться к автоопределению
 по стеку, `:profiles` — список профилей.
+
+Если профиль **не задан** (ни ключом `agent.profile`, ни флагом `--profile`), при
+старте интерактивного режима агент **спросит**, по какой роли работать: покажет
+пронумерованный список профилей и вариант «авто» (навыки по стеку проекта).
+Достаточно ввести номер или имя; Enter — оставить авто. Для разовой задачи (`-t`)
+вопрос не задаётся (режим автоматизации). Отключить вопрос можно флагом
+`--no-profile-ask` или ключом `agent.ask_profile: false`.
 
 Постоянно — ключом в конфиге:
 
@@ -357,6 +367,9 @@ python -m pip install rich prompt_toolkit
 | **Node.js** | нет | только если подключаете MCP-серверы через `npx` (по умолчанию — filesystem) | `node --version` |
 | **uv / uvx** | нет | только для MCP-серверов через `uvx` (например `mcp-server-fetch`) | `uvx --version` |
 | **PHP** | нет | нужен, только если вы проверяете PHP-код (`php -l`) | `php -v` |
+| **JDK** | нет | автолинт Java (`javac -proc:only`) | `javac -version` |
+| **Kotlin compiler** | нет | автолинт Kotlin (`kotlinc`) | `kotlinc -version` |
+| **Swift toolchain** | нет | автолинт Swift (`swiftc -parse`), только на macOS/Linux | `swiftc --version` |
 | **git** | нет | инструменты `git_status`/`git_diff`/`git_log` (если проект под git) | `git --version` |
 
 ```powershell
@@ -647,6 +660,7 @@ python "<AGENT_HOME>\agent.py" --doctor
     "api_retries": 3,
     "language": "русском",
     "profile": "",
+    "ask_profile": true,
     "loop_guard": { "enabled": true, "repeat_limit": 3 },
     "instructions": []
   },
@@ -664,7 +678,10 @@ python "<AGENT_HOME>\agent.py" --doctor
     "rules": [
       { "ext": [".php", ".phtml"], "command": "php -l {file}", "label": "php -l" },
       { "ext": [".js", ".mjs", ".cjs"], "command": "node --check {file}", "label": "node --check" },
-      { "ext": [".py"], "command": "python -m py_compile {file}", "label": "python -m py_compile" }
+      { "ext": [".py"], "command": "python -m py_compile {file}", "label": "python -m py_compile" },
+      { "ext": [".java"], "command": "javac -proc:only {file}", "label": "javac -proc:only" },
+      { "ext": [".kt", ".kts"], "command": "kotlinc {file} -d .agent-cache/lint-kotlin", "label": "kotlinc" },
+      { "ext": [".swift"], "command": "swiftc -parse {file}", "label": "swiftc -parse" }
     ]
   },
   "tools": {
@@ -696,6 +713,7 @@ python "<AGENT_HOME>\agent.py" --doctor
 | `agent.loop_guard.enabled` | Ловить зацикливание: одинаковый вызов инструмента с тем же результатом подряд |
 | `agent.loop_guard.repeat_limit` | Сколько таких повторов подряд считать циклом (`0` = выключить защиту) |
 | `agent.profile` | Профиль (роль) агента: `php`, `python`, `frontend`, `java`, `kotlin`, `swift` или свой из `profiles`. Пусто = авто по стеку |
+| `agent.ask_profile` | Спрашивать при старте REPL про профиль, если он не задан (снимается флагом `--no-profile-ask`) |
 | `agent.api_retries` | Сколько раз повторять запрос к API при сетевой ошибке/429 |
 | `agent.language` | Язык ответов агента (подставляется в системный промпт) |
 | `agent.instructions` | Доп. правила проекта: строка или список строк (попадают в промпт) |
@@ -967,6 +985,7 @@ setx DEEPSEEK_AGENT_HOME "<AGENT_HOME>"
 | `--doctor` | Показать диагностику окружения и выйти (API-ключ не нужен) |
 | `--clear-cache` | Очистить кэш проекта (`.agent-cache`) перед запуском, без вопросов |
 | `--no-cache-ask` | Не спрашивать при старте про очистку кэша |
+| `--no-profile-ask` | Не спрашивать при старте про профиль (работать авто по стеку) |
 | `--no-confirm` | Не спрашивать подтверждения для опасных операций |
 | `-y, --yes` | Алиас для `--no-confirm` |
 | `--show-tokens` | Показать статистику токенов после разовой задачи |

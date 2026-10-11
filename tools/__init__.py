@@ -106,8 +106,8 @@ TOOLS = [
         "function": {
             "name": "grep",
             "description": "Search by regex in project files. By default searches "
-                           "all code extensions (php, py, js, ts, html, css, "
-                           "templates, configs). Use include='.php' to filter by "
+                           "all code extensions (php, py, js, ts, java, kt, swift, "
+                           "html, css, templates, configs). Use include='.php' to filter by "
                            "extension, or include='*' to search EVERYTHING "
                            "(including .txt, .log and unknown types).",
             "parameters": {

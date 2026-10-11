@@ -87,6 +87,7 @@ from config import (
     api_retries as config_api_retries,
     web_settings as config_web_settings,
     ask_cache_on_start as config_ask_cache_on_start,
+    ask_profile_on_start as config_ask_profile_on_start,
     agent_language as config_agent_language,
     agent_instructions as config_agent_instructions,
     lint_settings as config_lint_settings,
@@ -206,6 +207,10 @@ CONTEXT_LIMIT = CONTEXT_LIMIT or 0
 
 # Спрашивать ли при старте REPL про очистку кэша (снимается флагом --no-cache-ask).
 ASK_CACHE_ON_START = True
+
+# Спрашивать ли при старте REPL про профиль, если он не задан (снимается
+# флагом --no-profile-ask или ключом agent.ask_profile в конфиге).
+ASK_PROFILE_ON_START = True
 
 # Сколько символов результата инструмента уходит в контекст.
 TOOL_RESULT_LIMIT = 8000
@@ -860,6 +865,74 @@ def maybe_ask_cache_clear() -> None:
         ui_info("Кэш оставлен. Очистить в любой момент — команда :cache.")
 
 
+def _match_profile(answer: str, names: list[str]) -> str | None:
+    """Сопоставляет ответ пользователя (номер или имя) с профилем.
+
+    Возвращает каноническое имя профиля или None, если ответ непонятен.
+    """
+    low = answer.strip().lower()
+    if low.isdigit():
+        idx = int(low)
+        if 1 <= idx <= len(names):
+            return names[idx - 1]
+        return None
+    for name in names:
+        if name.lower() == low:
+            return name
+    return None
+
+
+def maybe_ask_profile() -> bool:
+    """Если профиль не выбран — спрашивает при старте, по какой роли работать.
+
+    Пропускается, когда профиль уже задан конфигом/флагом `--profile`, когда
+    вход не интерактивный (пайп, CI) или когда запрос отключён (`--no-profile-ask`,
+    ключ `agent.ask_profile`). Возвращает True, если профиль был выбран.
+    """
+    if not ASK_PROFILE_ON_START or not config_ask_profile_on_start():
+        return False
+    if app_config.agent_profile():
+        return False  # уже задан конфигом или флагом --profile
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except (AttributeError, ValueError):
+        return False
+
+    names = app_config.profile_names()
+    if not names:
+        return False
+
+    all_profiles = app_config.profiles()
+    ui_print("[bold]Профиль не выбран.[/bold] По какому профилю работать?")
+    for i, name in enumerate(names, 1):
+        desc = str((all_profiles.get(name) or {}).get("description") or "")
+        ui_print(f"  [cyan]{i}[/cyan]. {name} — {desc}")
+    ui_print("  [cyan]0[/cyan]. авто — навыки по стеку проекта "
+             f"({stack_summary(PROJECT_ROOT)})", style="dim")
+
+    while True:
+        ans = _ask("Профиль (номер/имя, Enter — авто): ")
+        if ans in ("", "0", "auto", "none", "off", "-"):
+            ui_info("Профиль: авто (навыки по стеку проекта). "
+                    "Сменить позже — :profile <имя>.")
+            return False
+        name = _match_profile(ans, names)
+        if name:
+            app_config.set_profile(name)
+            current = app_config.active_profile()
+            ui_info(f"Профиль: {current['name']} — {current['description']} "
+                    f"(навыки: {', '.join(current['skills']) or '—'})")
+            return True
+        ui_error(f"Не понял: «{ans}». Введите номер из списка, имя профиля "
+                 "или Enter — авто.")
+        try:
+            if not sys.stdin.isatty():
+                return False
+        except (AttributeError, ValueError):
+            return False
+
+
 def cmd_tokens() -> None:
     if TOKEN_STATS["requests"] == 0:
         ui_info("Пока не было запросов к API.")
@@ -1208,7 +1281,8 @@ def cmd_doctor() -> None:
     print()
 
     ui_print("[bold]Утилиты[/bold]")
-    for name in ("npx", "node", "uvx", "php", "python"):
+    for name in ("npx", "node", "uvx", "php", "python",
+                 "javac", "kotlinc", "swiftc"):
         found = shutil.which(name)
         mark = "✓" if found else "✗"
         color = "green" if found else "dim"
@@ -1377,7 +1451,7 @@ async def repl(system_prompt: str) -> None:
 # ---------- Точка входа ----------
 
 async def main_async(args) -> None:
-    global PROJECT_ROOT, CONFIRM_MODE, mcp_manager, ASK_CACHE_ON_START
+    global PROJECT_ROOT, CONFIRM_MODE, mcp_manager, ASK_CACHE_ON_START, ASK_PROFILE_ON_START
 
     if args.list_profiles:
         PROJECT_ROOT = config_setup(args.project_root)
@@ -1425,11 +1499,21 @@ async def main_async(args) -> None:
     if args.no_cache_ask:
         ASK_CACHE_ON_START = False
 
+    if args.no_profile_ask:
+        ASK_PROFILE_ON_START = False
+
     _open_session_log()
 
     if args.clear_cache:
         ui_print(clear_cache(PROJECT_ROOT), style="green")
         log_line("cache", "cleared by --clear-cache")
+
+    # Профиль не задан (ни конфигом, ни --profile): в интерактивном режиме
+    # спрашиваем роль, чтобы сразу подгрузить нужные навыки. Для разовой
+    # задачи (-t) не спрашиваем — это режим автоматизации.
+    if not args.task:
+        if maybe_ask_profile():
+            log_line("profile", app_config.agent_profile() or "auto")
 
     ui_print(f"[bold]DeepSeek Agent[/bold]  ·  проект: [cyan]{PROJECT_ROOT}[/cyan]")
     ui_print(f"                ·  модель: [cyan]{MODEL}[/cyan]  "
@@ -1528,6 +1612,9 @@ def main():
                              "история ввода) перед запуском, без вопросов.")
     parser.add_argument("--no-cache-ask", action="store_true",
                         help="Не спрашивать при старте про очистку кэша.")
+    parser.add_argument("--no-profile-ask", action="store_true",
+                        help="Не спрашивать при старте про профиль (роль): "
+                             "работать авто по стеку, если профиль не задан.")
     args = parser.parse_args()
 
     try:

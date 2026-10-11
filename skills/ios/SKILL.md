@@ -13,14 +13,15 @@ applies_to: [ios, swift, apple, xcode, uikit, swiftui, macos]
 - Зависимости передавай явно (внедрение); избегай глобальных синглтонов.
 - Сетевые и дисковые операции — асинхронно, главный поток не блокируем.
 
-## UIKit / SwiftUI
+## UI (следуй Apple Human Interface Guidelines)
 - SwiftUI: stateless-`View`, состояние — `@State`/`@Binding`/`@StateObject`,
   списки — `List`/`ForEach` со стабильными `id`.
 - UIKit: переиспользуй ячейки (`dequeueReusableCell`), не держи тяжёлые объекты
   в ячейке, не пересоздавай представления в цикле.
 - Вёрстка — через Auto Layout/constraints (или SwiftUI-модификаторы), без хардкода
   координат под один экран.
-- Доступность: `accessibilityLabel`, Dynamic Type, контраст.
+- Прорабатывай состояния пусто/загрузка/ошибка; итерации по UI — через SwiftUI Previews.
+- Доступность: `accessibilityLabel`, Dynamic Type, контраст, достаточные тач-таргеты.
 
 ## Ресурсы и данные
 - Локализация — через `Localizable.strings`/String Catalog, не хардкод строк.

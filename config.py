@@ -101,6 +101,9 @@ DEFAULTS: dict = {
         # Пусто = авто: навыки выбираются по стеку проекта. Переключается флагом
         # --profile или командой :profile.
         "profile": "",
+        # Спрашивать при старте интерактивного режима, по какому профилю работать,
+        # если он не задан ни конфигом, ни флагом. Снимается флагом --no-profile-ask.
+        "ask_profile": True,
         # Защита от зацикливания: одинаковый вызов инструмента с тем же
         # результатом подряд. Работает и при max_steps = 0.
         "loop_guard": {
@@ -144,6 +147,17 @@ DEFAULTS: dict = {
              "label": "node --check"},
             {"ext": [".py"], "command": "python -m py_compile {file}",
              "label": "python -m py_compile"},
+            # Java: только разбор (без генерации .class) — быстро и без артефактов.
+            {"ext": [".java"], "command": "javac -proc:only {file}",
+             "label": "javac -proc:only"},
+            # Kotlin: kotlinc не умеет «только разбор», но кладём вывод в кэш,
+            # чтобы не мусорить в дереве проекта (каталог .agent-cache игнорируется).
+            {"ext": [".kt", ".kts"],
+             "command": "kotlinc {file} -d .agent-cache/lint-kotlin",
+             "label": "kotlinc"},
+            # Swift: -parse разбирает файл без типизации и без записи файлов.
+            {"ext": [".swift"], "command": "swiftc -parse {file}",
+             "label": "swiftc -parse"},
         ],
     },
     "tools": {
@@ -482,6 +496,11 @@ def max_backups() -> int:
 def ask_cache_on_start() -> bool:
     """Спрашивать ли при старте, очищать ли кэш проекта."""
     return bool(CACHE.get("ask_on_start", DEFAULTS["cache"]["ask_on_start"]))
+
+
+def ask_profile_on_start() -> bool:
+    """Спрашивать ли при старте, по какому профилю работать (ключ agent.ask_profile)."""
+    return bool(AGENT_CFG.get("ask_profile", DEFAULTS["agent"]["ask_profile"]))
 
 
 def max_steps() -> int:
