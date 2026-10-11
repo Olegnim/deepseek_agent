@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "_comment": "Пути не хардкодятся: корень проекта агент берёт сам из cwd задачи (= папка открытого воркспейса), папку агента вычисляет из расположения agent.py. Флаг -p нужен только для явного переопределения.",
+  "tasks": [
+    {
+      "label": "DeepSeek: run task",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "${workspaceFolder}/agent.py",
+        "-t", "${input:agentTask}"
+      ],
+      "presentation": { "panel": "new", "reveal": "always" },
+      "problemMatcher": []
+    },
+    {
+      "label": "DeepSeek: interactive",
+      "type": "shell",
+      "command": "python",
+      "args": ["${workspaceFolder}/agent.py"],
+      "presentation": { "panel": "dedicated", "reveal": "always" },
+      "problemMatcher": []
+    },
+    {
+      "label": "DeepSeek: doctor",
+      "type": "shell",
+      "command": "python",
+      "args": ["${workspaceFolder}/agent.py", "-t", "покажи диагностику окружения"],
+      "presentation": { "panel": "new", "reveal": "always" },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "agentTask",
+      "type": "promptString",
+      "description": "Задача для агента",
+      "default": "Проверь синтаксис PHP и исправь ошибки"
+    }
+  ]
+}

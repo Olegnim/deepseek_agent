@@ -1,0 +1,26 @@
+{
+  "_readme": "Настройки агента. Пути задавать не обязательно: корень проекта = папка запуска (cwd), папка агента определяется автоматически из расположения agent.py. project_root здесь нужен только если агент запускается не из папки проекта. Переопределение: флаг -p, затем DEEPSEEK_PROJECT_ROOT. Подстановки: ${env:VAR}, ${agent_home}, ${project_root}.",
+  "api": {
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "api_key": "",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "temperature": 0.2,
+    "context_limit": 65536
+  },
+  "paths": {
+    "project_root": "",
+    "skills_dir": "skills",
+    "mcp_config": [
+      "mcp_config.json",
+      ".mcp.json"
+    ],
+    "backup_dir": ".agent-cache/backups",
+    "plugins_dirs": [
+      "plugins"
+    ]
+  },
+  "snapshots": {
+    "max_backups": 50
+  }
+}

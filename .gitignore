@@ -208,6 +208,35 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# DeepSeek CLI Agent: кэш, автоснапшоты правок
+.agent-cache/
+
+# Секреты и локальные оверрайды конфигов
+# (agent.config.json — шаблон для коммита, ключ хранить в .agent.config.json)
+.agent.config.json
+agent.config.local.json
+mcp_config.local.json
+.mcp.json
+*.bak
+*.orig
+
+# Node / npx (MCP-серверы)
+node_modules/
+.npm/
+
+# PHP
+vendor/
+composer.phar
+.php-cs-fixer.cache
+.phpunit.cache/
+.phpunit.result.cache
+
+# ОС / IDE
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+
 # PyPI configuration file
 .pypirc
 

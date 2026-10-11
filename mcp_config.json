@@ -1,0 +1,15 @@
+{
+  "_readme": "MCP-серверы агента. Абсолютные пути можно не писать: используйте ${project_root} (берётся из agent.config.json), ${agent_dir}, ${env:VAR}. Сервер с \"enabled\": false пропускается.",
+
+  "mcpServers": {
+    "filesystem": {
+      "enabled": true,
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "${project_root}"
+      ]
+    }
+  }
+}
