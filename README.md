@@ -28,6 +28,11 @@ deepseek-agent/                 # = AGENT_HOME, определяется авт�
 │   ├── php-conventions/
 │   ├── php-web/
 │   ├── python-conventions/
+│   ├── java-conventions/
+│   ├── kotlin-conventions/
+│   ├── android/
+│   ├── swift-conventions/
+│   ├── ios/
 │   └── web-frontend/           # каждая — папка с SKILL.md
 ├── plugins/                    # (опционально) доп. модули агента
 ├── .agent-cache/               # служебное (в папке проекта, в git не попадает)
@@ -226,8 +231,10 @@ Git (только чтение, коммиты — за человеком):
 
 При старте агент определяет стек по маркерным файлам (`composer.json`,
 `package.json` + `tsconfig.json`, `pyproject.toml` / `requirements.txt`,
-`go.mod`, `Cargo.toml`, `Gemfile`, `pom.xml`, …) и показывает его в `--doctor`
-и `:config` (например, `Python (FastAPI)` или `PHP (Laravel)`). По этому же
+`go.mod`, `Cargo.toml`, `Gemfile`, `pom.xml`, `build.gradle(.kts)`,
+`AndroidManifest.xml`, `Package.swift`, `*.xcodeproj`, …) и показывает его в
+`--doctor` и `:config` (например, `Python (FastAPI)`, `PHP (Laravel)`,
+`Android (Kotlin)` или `iOS (Swift)`). По этому же
 определению подбираются навыки (см. `applies_to` в [разделе 6](#6-навыки-skills)),
 если профиль не задан явно.
 
@@ -253,7 +260,8 @@ python "<AGENT_HOME>\agent.py" --profile python           # ...или Python-р�
 { "agent": { "profile": "php" } }
 ```
 
-Встроенные профили: `php`, `python`, `frontend` (плюс `""` = авто по стеку).
+Профили по умолчанию: `php`, `python`, `frontend`, `java`, `kotlin`, `swift`
+(плюс `""` = авто по стеку).
 Свои добавляются секцией `profiles` в `agent.config.json` — **код агента менять
 не нужно**, поэтому расширение на любой другой язык сводится к одному JSON-блоку
 и папке навыка:
@@ -645,7 +653,10 @@ python "<AGENT_HOME>\agent.py" --doctor
   "profiles": {
     "php":      { "description": "PHP-разработчик (веб-приложения)", "skills": ["code-quality", "php-conventions", "php-web"] },
     "python":   { "description": "Python-разработчик", "skills": ["code-quality", "python-conventions"] },
-    "frontend": { "description": "Фронтенд-разработчик (HTML/CSS/JS/TS)", "skills": ["code-quality", "web-frontend"] }
+    "frontend": { "description": "Фронтенд-разработчик (HTML/CSS/JS/TS)", "skills": ["code-quality", "web-frontend"] },
+    "java":     { "description": "Java-разработчик (JVM, Spring, Maven/Gradle)", "skills": ["code-quality", "java-conventions"] },
+    "kotlin":   { "description": "Kotlin/Android-разработчик", "skills": ["code-quality", "kotlin-conventions", "android"] },
+    "swift":    { "description": "Swift/iOS-разработчик (Apple-платформы)", "skills": ["code-quality", "swift-conventions", "ios"] }
   },
   "lint": {
     "enabled": true,
@@ -684,7 +695,7 @@ python "<AGENT_HOME>\agent.py" --doctor
 | `agent.max_steps` | Максимум шагов модели на одну задачу. `0` (по умолчанию) = без ограничений |
 | `agent.loop_guard.enabled` | Ловить зацикливание: одинаковый вызов инструмента с тем же результатом подряд |
 | `agent.loop_guard.repeat_limit` | Сколько таких повторов подряд считать циклом (`0` = выключить защиту) |
-| `agent.profile` | Профиль (роль) агента: `php`, `python`, `frontend` или свой из `profiles`. Пусто = авто по стеку |
+| `agent.profile` | Профиль (роль) агента: `php`, `python`, `frontend`, `java`, `kotlin`, `swift` или свой из `profiles`. Пусто = авто по стеку |
 | `agent.api_retries` | Сколько раз повторять запрос к API при сетевой ошибке/429 |
 | `agent.language` | Язык ответов агента (подставляется в системный промпт) |
 | `agent.instructions` | Доп. правила проекта: строка или список строк (попадают в промпт) |
@@ -780,6 +791,11 @@ applies_to: [python, django, flask, fastapi]
 | `php-conventions` | Проекты на PHP: `declare(strict_types=1)`, PSR-12/PSR-4, проверка `php -l` |
 | `php-web` | Веб на PHP (Laravel, Symfony, Yii, CakePHP): PDO/prepared statements, экранирование вывода, CSRF, `password_hash()` |
 | `python-conventions` | Проекты на Python (Django, Flask, FastAPI): PEP 8, типизация, `logging` вместо `print`, ресурсы через `with` |
+| `java-conventions` | Проекты на Java (JVM, Spring, Maven/Gradle): именование, `equals` вместо `==`, try-with-resources, `record`/`var` в Java 17+ |
+| `kotlin-conventions` | Проекты на Kotlin (JVM/Android): `val` вместо `var`, null-safety без `!!`, корутины без `GlobalScope`, scope-функции |
+| `android` | Приложения под Android: `ViewModel`/репозитории, ресурсы вместо хардкода, разрешения в рантайме, R8/`@Keep` |
+| `swift-conventions` | Проекты на Swift (Apple): `let`/`struct`, без force unwrap, `async/await` и `actor`, `os.Logger` |
+| `ios` | Приложения под iOS (UIKit/SwiftUI): разделение UI и логики, SwiftUI-состояние, локализация, Keychain |
 | `web-frontend` | HTML/CSS/JS/TS (React, Vue, Svelte, Next, Nuxt, Angular): семантика и доступность, Flexbox/Grid, mobile-first |
 
 Свои навыки можно положить в `<PROJECT_ROOT>/skills/` — они приоритетнее встроенных.
@@ -946,7 +962,7 @@ setx DEEPSEEK_AGENT_HOME "<AGENT_HOME>"
 |---|---|
 | `-p, --project-root` | Корень проекта. По умолчанию — папка запуска (cwd) |
 | `-t, --task` | Задача для агента. Если не указана — интерактивный режим |
-| `--profile` | Профиль (роль) агента: `php`, `python`, `frontend` или свой из `profiles` |
+| `--profile` | Профиль (роль) агента: `php`, `python`, `frontend`, `java`, `kotlin`, `swift` или свой из `profiles` |
 | `--list-profiles` | Показать доступные профили и выйти (API-ключ не нужен) |
 | `--doctor` | Показать диагностику окружения и выйти (API-ключ не нужен) |
 | `--clear-cache` | Очистить кэш проекта (`.agent-cache`) перед запуском, без вопросов |

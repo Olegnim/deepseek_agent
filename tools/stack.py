@@ -105,6 +105,23 @@ def _has_any(root: Path, names: tuple[str, ...]) -> bool:
     return any((root / n).exists() for n in names)
 
 
+def _file_contains(path: Path, needle: str) -> bool:
+    """Есть ли подстрока в файле (регистр не важен). Отсутствующий файл — False."""
+    try:
+        return needle.lower() in path.read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError:
+        return False
+
+
+def _has_source(root: Path, suffix: str) -> bool:
+    """Есть ли исходники с таким расширением в типовых папках проекта."""
+    for sub in ("", "src", "app", "src/main", "Sources"):
+        base = root / sub if sub else root
+        if base.is_dir() and next(base.glob(f"*.{suffix}"), None) is not None:
+            return True
+    return False
+
+
 def detect_stack(root: str | Path = ".") -> list[str]:
     """Возвращает список распознанных стеков проекта (может быть пустым)."""
     root = Path(root)
@@ -140,8 +157,32 @@ def detect_stack(root: str | Path = ".") -> list[str]:
         found.append("Rust")
     if _has_any(root, ("Gemfile",)):
         found.append("Ruby")
-    if _has_any(root, ("pom.xml", "build.gradle", "build.gradle.kts")):
-        found.append("Java/Kotlin (JVM)")
+
+    # --- JVM: Java / Kotlin / Android ---
+    jvm_marker = _has_any(root, (
+        "pom.xml", "build.gradle", "build.gradle.kts",
+        "settings.gradle", "settings.gradle.kts", "AndroidManifest.xml",
+    ))
+    if jvm_marker:
+        is_android = (root / "AndroidManifest.xml").is_file() \
+            or _file_contains(root / "build.gradle", "com.android") \
+            or _file_contains(root / "build.gradle.kts", "com.android")
+        is_kotlin = (root / "build.gradle.kts").is_file() or _has_source(root, "kt")
+        if is_android:
+            found.append("Android (Kotlin)" if is_kotlin else "Android (Java)")
+        elif is_kotlin:
+            found.append("Kotlin (JVM)")
+        else:
+            found.append("Java (JVM)")
+
+    # --- Swift / iOS ---
+    has_xcode = _has_any(root, ("Package.swift", "Podfile", "Cartfile")) \
+        or next(root.glob("*.xcodeproj"), None) is not None \
+        or next(root.glob("*.xcworkspace"), None) is not None
+    if has_xcode:
+        found.append("iOS (Swift)")
+    elif _has_source(root, "swift"):
+        found.append("Swift")
 
     # --- Статический фронтенд ---
     public_html = (root / "public").is_dir() and any((root / "public").glob("*.html"))

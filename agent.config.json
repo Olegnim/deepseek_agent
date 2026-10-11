@@ -40,7 +40,22 @@
     "instructions": []
   },
   "profiles": {
-    "_readme": "Профили (роли) агента: имя -> {description, skills, instructions}. skills — имена папок в skills/. Встроенные: php, python, frontend (см. config.py). Свой язык добавляется здесь, код агента менять не нужно. Пример: \"go\": { \"description\": \"Go-разработчик\", \"skills\": [\"code-quality\", \"go-conventions\"] }."
+    "_readme": "Профили (роли) агента: имя -> {description, skills, instructions}. skills — имена папок в skills/. Встроенные: php, python, frontend (см. config.py). Свой язык добавляется здесь, код агента менять не нужно. Пример: \"go\": { \"description\": \"Go-разработчик\", \"skills\": [\"code-quality\", \"go-conventions\"] }.",
+    "java": {
+      "description": "Java-разработчик (JVM, Spring, Maven/Gradle)",
+      "skills": ["code-quality", "java-conventions"],
+      "instructions": []
+    },
+    "kotlin": {
+      "description": "Kotlin/Android-разработчик",
+      "skills": ["code-quality", "kotlin-conventions", "android"],
+      "instructions": []
+    },
+    "swift": {
+      "description": "Swift/iOS-разработчик (Apple-платформы)",
+      "skills": ["code-quality", "swift-conventions", "ios"],
+      "instructions": []
+    }
   },
   "lint": {
     "enabled": true,
