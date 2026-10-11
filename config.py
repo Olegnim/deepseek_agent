@@ -101,9 +101,6 @@ DEFAULTS: dict = {
         # Пусто = авто: навыки выбираются по стеку проекта. Переключается флагом
         # --profile или командой :profile.
         "profile": "",
-        # Спрашивать при старте интерактивного режима, по какому профилю работать,
-        # если он не задан ни конфигом, ни флагом. Снимается флагом --no-profile-ask.
-        "ask_profile": True,
         # Защита от зацикливания: одинаковый вызов инструмента с тем же
         # результатом подряд. Работает и при max_steps = 0.
         "loop_guard": {
@@ -496,11 +493,6 @@ def max_backups() -> int:
 def ask_cache_on_start() -> bool:
     """Спрашивать ли при старте, очищать ли кэш проекта."""
     return bool(CACHE.get("ask_on_start", DEFAULTS["cache"]["ask_on_start"]))
-
-
-def ask_profile_on_start() -> bool:
-    """Спрашивать ли при старте, по какому профилю работать (ключ agent.ask_profile)."""
-    return bool(AGENT_CFG.get("ask_profile", DEFAULTS["agent"]["ask_profile"]))
 
 
 def max_steps() -> int:

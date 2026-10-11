@@ -33,8 +33,6 @@
     "language": "русском",
     "_profile_help": "Профиль (роль) агента: ключ из секции profiles или \"\" — авто по стеку проекта. Переключается флагом --profile или командой :profile.",
     "profile": "",
-    "_ask_profile_help": "Спрашивать при старте интерактивного режима, по какому профилю работать, если он не задан. Отключается флагом --no-profile-ask.",
-    "ask_profile": true,
     "loop_guard": {
       "enabled": true,
       "repeat_limit": 3
