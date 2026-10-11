@@ -872,7 +872,7 @@ def cmd_help() -> None:
   [cyan]:profiles[/cyan]         — список профилей (ролей) агента
   [cyan]:skills[/cyan]            — загруженные навыки
   [cyan]:mcp[/cyan]               — статус MCP-серверов
-  [cyan]:vscode[/cyan]            — статус моста к VS Code (открытие файлов в редакторе)
+  [cyan]:vscode[/cyan]            — статус моста к VS Code; [cyan]:vscode start[/cyan] — поднять редактор
   [cyan]:snapshots[/cyan]         — список снапшотов
   [cyan]:restore[/cyan]           — восстановить последний снапшот
   [cyan]:auto[/cyan]              — переключить режим подтверждений
@@ -1100,11 +1100,49 @@ def cmd_mcp() -> None:
         ui_print(f"[bold]{srv}[/bold]: {len(tools)} инструментов", style="cyan")
 
 
-def cmd_vscode() -> None:
-    """Статус моста к VS Code (расширение vscode-extension/)."""
+def _start_vscode_bridge() -> None:
+    """Поднимает мост к VS Code на старте: при необходимости запускает редактор.
+
+    Вызывается только в интерактивном режиме (см. main_async) и никогда не
+    мешает работе: если CLI `code` или расширения нет — просто печатает подсказку.
+    """
+    settings = app_config.vscode_settings()
+    if not settings.get("enabled", True):
+        return
+
+    info = vscode_tools.bridge_info(PROJECT_ROOT)
+    if info and vscode_tools.available(force=True):
+        ui_info(f"VS Code: мост активен (127.0.0.1:{info.get('port')})")
+        return
+    if not settings.get("auto_start", True):
+        ui_info("VS Code: мост не активен — поднять: :vscode start")
+        return
+
+    status = vscode_tools.bootstrap(PROJECT_ROOT)
+    if vscode_tools.available(force=True):
+        ui_print(f"[green]✓[/green] VS Code: {status}")
+    else:
+        ui_print(f"[yellow]~[/yellow] VS Code: {status}")
+
+
+def cmd_vscode(arg: str = "") -> None:
+    """Статус моста к VS Code; `:vscode start` — запустить редактор и мост."""
     settings = app_config.vscode_settings()
     if not settings.get("enabled", True):
         ui_info("Интеграция с VS Code выключена (vscode.enabled = false).")
+        return
+
+    arg = (arg or "").strip().lower()
+    if arg in ("start", "restart", "on"):
+        ui_info("VS Code: запускаю редактор с проектом…")
+        status = vscode_tools.bootstrap(PROJECT_ROOT, force=(arg == "restart"))
+        if vscode_tools.available(force=True):
+            ui_print(f"[green]✓[/green] VS Code: {status}")
+        else:
+            ui_print(f"[yellow]~[/yellow] VS Code: {status}")
+        return
+    if arg and arg not in ("status", "info"):
+        ui_error("Использование: :vscode  или  :vscode start")
         return
 
     info = vscode_tools.bridge_info(PROJECT_ROOT)
@@ -1112,13 +1150,15 @@ def cmd_vscode() -> None:
         ui_error("Мост к VS Code не найден — расширение не запущено.")
         ui_info("Установите расширение из папки vscode-extension/ "
                 "(см. vscode-extension/README.md) и откройте проект в VS Code.")
+        ui_info("Либо просто введите :vscode start — агент запустит редактор сам.")
         ui_info(f"Ожидается файл: {vscode_tools.bridge_file(PROJECT_ROOT)}")
         return
 
     if not vscode_tools.available(force=True):
         ui_error("Файл моста есть, но VS Code не отвечает — похоже, редактор "
                  "был закрыт аварийно.")
-        ui_info("Перезапустите VS Code: расширение пересоздаст "
+        ui_info("Перезапустите мост: :vscode restart (агент сам откроет VS Code).")
+        ui_info("Либо перезапустите VS Code вручную: расширение пересоздаст "
                 f"{vscode_tools.bridge_file(PROJECT_ROOT).name}.")
         return
 
@@ -1315,6 +1355,13 @@ def cmd_doctor() -> None:
                      style="dim")
             ui_print("      → установите расширение: vscode-extension/README.md",
                      style="yellow")
+            if vscode_cfg.get("auto_start", True):
+                ui_print("      → автозапуск включён (vscode.auto_start): в "
+                         "интерактивном режиме агент откроет VS Code сам",
+                         style="dim")
+            else:
+                ui_print("      → автозапуск выключен: введите :vscode start",
+                         style="dim")
     print()
 
     ui_print("[bold]Снапшоты[/bold]")
@@ -1424,6 +1471,8 @@ async def handle_command(cmd: str, messages: list) -> bool:
         cmd_mcp()
     elif c == ":vscode":
         cmd_vscode()
+    elif c.startswith(":vscode "):
+        cmd_vscode(c.split(None, 1)[1])
     elif c == ":snapshots":
         cmd_snapshots()
     elif c == ":restore":
@@ -1640,6 +1689,11 @@ async def main_async(args) -> None:
             ui_info(f"MCP: {len(mcp_manager.get_tools())} инструментов "
                     f"из {len(servers_by_name)} серверов "
                     f"({', '.join(str(p) for p in mcp_paths)})")
+
+    # Мост к VS Code: в интерактивном режиме агент сам поднимает редактор,
+    # если моста нет (vscode.auto_start). Для разовых задач (-t) не вмешиваемся.
+    if not args.task:
+        _start_vscode_bridge()
 
     print()
 

@@ -8,6 +8,10 @@
 Если расширение не запущено, инструменты возвращают понятное сообщение, а
 агент продолжает работать как обычно (авто-открытие молча пропускается).
 
+Мост можно поднять автоматически: `bootstrap()` запускает VS Code с проектом
+через CLI `code` (если он есть в PATH) и ждёт появления моста. Агент вызывает
+его на старте интерактивного режима, когда включён `vscode.auto_start`.
+
 Настройки — секция "vscode" в agent.config.json (см. config.vscode_settings).
 """
 
@@ -15,6 +19,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -23,7 +30,13 @@ from pathlib import Path
 import config
 
 BRIDGE_FILENAME = "vscode-bridge.json"
+# Имя расширения-моста (vscode-extension/package.json) — для проверки установки.
+BRIDGE_EXTENSION = "deepseek-agent-bridge"
 DEFAULT_TIMEOUT = 5.0
+# Сколько секунд по умолчанию ждать мост после запуска VS Code.
+DEFAULT_START_WAIT = 8.0
+# Имена CLI VS Code, которые ищем в PATH.
+CODE_CLI_NAMES = ("code", "code.cmd", "code-insiders", "code-insiders.cmd")
 # Короткая проверка «мост жив» и кэш к ней: available() вызывается часто
 # (при сборке промпта и списка инструментов), а пинговать каждый раз незачем.
 PROBE_TIMEOUT = 0.5
@@ -323,6 +336,122 @@ def vscode_status() -> str:
 
     return (f"VS Code: мост активен — 127.0.0.1:{info.get('port')}, "
             f"проект {info.get('workspace')}")
+
+
+# ---------- Автозапуск редактора (мост поднимается сам) ----------
+
+def code_cli() -> str | None:
+    """Путь к CLI VS Code (`code` / `code-insiders`) в PATH либо None."""
+    for name in CODE_CLI_NAMES:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+def _cli_argv(cli: str, *args: str) -> list[str]:
+    """Команда запуска CLI: .cmd/.bat в Windows идут через командный интерпретатор."""
+    if os.name == "nt" and cli.lower().endswith((".cmd", ".bat")):
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/c", cli, *args]
+    return [cli, *args]
+
+
+def _spawn_detached(argv: list[str]) -> None:
+    """Запускает процесс отдельно от агента (не держит консоль и не блокирует)."""
+    kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(argv, **kwargs)  # noqa: S603 — argv собирается из CLI в PATH
+
+
+def wait_for_bridge(timeout: float | None = None,
+                    interval: float = 0.4) -> dict | None:
+    """Ждёт появления живого моста до timeout секунд. Возвращает его info или None."""
+    if timeout is None:
+        timeout = float(config.vscode_settings().get("start_wait") or DEFAULT_START_WAIT)
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        if available(force=True):
+            return bridge_info()
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval)
+
+
+_ext_cache: dict[str, bool] = {}
+
+
+def extension_installed(cli: str | None = None, force: bool = False) -> bool:
+    """Установлено ли расширение-мост в VS Code (ответ кэшируется на процесс)."""
+    cli = cli or code_cli()
+    if not cli:
+        return False
+    if not force and cli in _ext_cache:
+        return _ext_cache[cli]
+
+    installed = False
+    try:
+        proc = subprocess.run(  # noqa: S603 — cli берётся из PATH
+            _cli_argv(cli, "--list-extensions"),
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        installed = BRIDGE_EXTENSION in (proc.stdout or "").lower()
+    except (OSError, subprocess.SubprocessError) as e:
+        _log.debug("vscode --list-extensions: %s", e)
+
+    _ext_cache[cli] = installed
+    return installed
+
+
+def bootstrap(project_root: str | Path | None = None,
+              wait: float | None = None, force: bool = False) -> str:
+    """Поднимает мост: запускает VS Code с проектом и ждёт ответа расширения.
+
+    Возвращает короткий текст статуса для пользователя. Ничего не ломает:
+    нет CLI, расширения или мост не ответил — вернётся подсказка, а агент
+    продолжит работать как обычно.
+
+    force=True — не сообщать «мост уже активен», а перезапустить проверку.
+    """
+    if not config.vscode_settings().get("enabled", True):
+        return "интеграция с VS Code выключена (vscode.enabled = false)"
+
+    info = bridge_info(project_root)
+    if info and available(force=True) and not force:
+        return f"мост уже активен: 127.0.0.1:{info.get('port')}"
+
+    cli = code_cli()
+    if not cli:
+        return ("CLI VS Code (`code`) не найден в PATH — откройте проект в VS Code "
+                "вручную (File → Open Folder): расширение поднимет мост само")
+
+    if not extension_installed(cli):
+        return ("расширение deepseek-agent-bridge не установлено — см. "
+                "vscode-extension/README.md (быстро: "
+                "code --install-extension <путь>.vsix)")
+
+    root = Path(project_root or config.PROJECT_ROOT).resolve()
+    try:
+        _spawn_detached(_cli_argv(cli, str(root)))
+    except OSError as e:
+        return f"не удалось запустить VS Code ({cli}): {e}"
+
+    if wait is None:
+        wait = float(config.vscode_settings().get("start_wait") or DEFAULT_START_WAIT)
+    info = wait_for_bridge(wait)
+    if info:
+        return f"VS Code запущен, мост активен: 127.0.0.1:{info.get('port')}"
+    return (f"VS Code запущен, но мост не ответил за {int(wait)} с — "
+            "проверьте индикатор «DeepSeek: мост» в статус-баре (:vscode)")
 
 
 # ---------- Авто-открытие после правки ----------

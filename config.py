@@ -182,6 +182,11 @@ DEFAULTS: dict = {
         "auto_close_previous": False,
         # Таймаут HTTP-запроса к мосту, секунды.
         "timeout": 5,
+        # На старте интерактивного режима: если моста нет, запустить VS Code с
+        # проектом (CLI `code`) и дождаться, пока расширение поднимет мост.
+        "auto_start": True,
+        # Сколько секунд ждать мост после запуска VS Code.
+        "start_wait": 8,
     },
 }
 
@@ -779,7 +784,8 @@ def settings_summary() -> str:
         f"web:           {'вкл' if WEB.get('enabled', True) else 'выкл'} "
         f"(timeout {WEB.get('timeout')} c, лимит {WEB.get('max_chars')} симв.)",
         f"vscode:        {'вкл' if VSCODE.get('enabled', True) else 'выкл'} "
-        f"(авто-открытие правок: {'да' if VSCODE.get('auto_open', True) else 'нет'})",
+        f"(авто-открытие правок: {'да' if VSCODE.get('auto_open', True) else 'нет'}, "
+        f"автозапуск редактора: {'да' if VSCODE.get('auto_start', True) else 'нет'})",
     ]
     plugins = plugins_candidates()
     if plugins:

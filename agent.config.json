@@ -84,6 +84,9 @@
     "enabled": true,
     "auto_open": true,
     "auto_close_previous": false,
-    "timeout": 5
+    "timeout": 5,
+    "auto_start": true,
+    "start_wait": 8,
+    "_auto_start_help": "При старте интерактивного режима, если моста нет: запустить VS Code с проектом (CLI `code`) и ждать мост start_wait секунд. Выключить — auto_start: false; поднять вручную в сессии — команда :vscode start."
   }
 }
