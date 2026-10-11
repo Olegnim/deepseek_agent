@@ -410,6 +410,17 @@ def build_system_prompt() -> str:
                 f"- {line}" for line in profile["instructions"]
             )
 
+    if os.name == "nt":
+        local_check_hint = (
+            '  run_shell(\'powershell -Command "Test-NetConnection '
+            '127.0.0.1 -Port 8124"\')'
+        )
+    else:
+        local_check_hint = (
+            '  run_shell("nc -z 127.0.0.1 8124")  '
+            '# или: run_shell("curl -s http://127.0.0.1:8124")'
+        )
+
     return f"""Ты CLI-агент для написания и правки кода.
 Ты работаешь с проектом в директории: {PROJECT_ROOT}
 Система: {platform.system()} {platform.release()}
@@ -457,7 +468,7 @@ def build_system_prompt() -> str:
   его в отдельном терминале, а сам делай короткую проверку одной командой,
   которая завершается сама:
   run_shell("curl -s http://127.0.0.1:8124")
-  run_shell('powershell -Command "Test-NetConnection 127.0.0.1 -Port 8124"')
+{local_check_hint}
 
 Навыки проекта:
 {skills or "(навыки не найдены)"}{profile_block}
@@ -1216,7 +1227,7 @@ def cmd_doctor() -> None:
     print()
 
     ui_print("[bold]Утилиты[/bold]")
-    for name in ("npx", "node", "uvx", "php", "python",
+    for name in ("npx", "node", "uvx", "php", "python", "python3",
                  "javac", "kotlinc", "swiftc"):
         found = shutil.which(name)
         mark = "✓" if found else "✗"
@@ -1407,7 +1418,15 @@ async def main_async(args) -> None:
 
     if not API_KEY:
         ui_error("Переменная окружения DEEPSEEK_API_KEY не установлена.")
-        print('Windows:  setx DEEPSEEK_API_KEY "sk-..."')
+        env_name = app_config.API.get("api_key_env") or "DEEPSEEK_API_KEY"
+        if os.name == "nt":
+            print(f'  Windows (cmd):        setx {env_name} "sk-..."')
+            print(f'  Windows (PowerShell): $env:{env_name} = "sk-..."')
+        else:
+            print(f'  Linux/macOS:          export {env_name}="sk-..."')
+            print(f'                        (постоянно: добавьте строку '
+                  f'в ~/.bashrc или ~/.zshrc и выполните `source ~/.bashrc`)')
+        print(f'  Либо укажите ключ в api.api_key файла .agent.config.json.')
         sys.exit(1)
 
     # Определяем корень проекта и перечитываем конфиги: -p > DEEPSEEK_PROJECT_ROOT

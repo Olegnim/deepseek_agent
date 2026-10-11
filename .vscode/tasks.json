@@ -1,11 +1,12 @@
 {
   "version": "2.0.0",
-  "_comment": "Пути не хардкодятся: корень проекта агент берёт сам из cwd задачи (= папка открытого воркспейса), папку агента вычисляет из расположения agent.py. Флаг -p нужен только для явного переопределения.",
+  "_comment": "Пути не хардкодятся: корень проекта агент берёт сам из cwd задачи (= папка открытого воркспейса), папку агента вычисляет из расположения agent.py. Флаг -p нужен только для явного переопределения. Команда интерпретатора зависит от ОС: на Windows это `python`, на Linux/macOS — `python3` (блоки windows/linux/osx ниже).",
   "tasks": [
     {
       "label": "DeepSeek: run task",
       "type": "shell",
-      "command": "python",
+      "command": "python3",
+      "windows": { "command": "python" },
       "args": [
         "${workspaceFolder}/agent.py",
         "-t", "${input:agentTask}"
@@ -16,7 +17,8 @@
     {
       "label": "DeepSeek: interactive",
       "type": "shell",
-      "command": "python",
+      "command": "python3",
+      "windows": { "command": "python" },
       "args": ["${workspaceFolder}/agent.py"],
       "presentation": { "panel": "dedicated", "reveal": "always" },
       "problemMatcher": []
@@ -24,7 +26,8 @@
     {
       "label": "DeepSeek: doctor",
       "type": "shell",
-      "command": "python",
+      "command": "python3",
+      "windows": { "command": "python" },
       "args": ["${workspaceFolder}/agent.py", "--doctor"],
       "presentation": { "panel": "new", "reveal": "always" },
       "problemMatcher": []

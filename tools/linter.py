@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import config
@@ -81,12 +82,27 @@ def _missing_tool(command: str) -> str | None:
     first = (command or "").strip().split()[0] if (command or "").strip() else ""
     if not first:
         return "(пустая команда)"
-    # python/python3 — считаем доступными (агент сам запущен на Python).
+    # python/python3/py — считаем доступными: линт идёт через sys.executable
+    # (см. _resolve_interpreter), который есть всегда.
     if first in {"python", "python3", "py"}:
         return None
     if shutil.which(first) is None:
         return first
     return None
+
+
+def _resolve_interpreter(command: str) -> str:
+    """Заменяет ведущий python/python3/py на путь к текущему интерпретатору.
+
+    На Debian/Ubuntu и macOS команды `python` может не быть (только `python3`),
+    а `py` есть только на Windows. Подстановка sys.executable гарантирует, что
+    проверка пойдёт тем же интерпретатором, что и агент, на любой ОС.
+    """
+    parts = command.split(" ", 1)
+    if parts[0] in {"python", "python3", "py"}:
+        rest = parts[1] if len(parts) > 1 else ""
+        return f'"{sys.executable}" {rest}'.rstrip()
+    return command
 
 
 def lint_file(path: str | os.PathLike) -> str | None:
@@ -118,6 +134,7 @@ def lint_file(path: str | os.PathLike) -> str | None:
         return f"линт {label}: пропущен — утилита «{missing}» не найдена в PATH"
 
     command = template.replace("{file}", f'"{_display_path(p)}"')
+    command = _resolve_interpreter(command)
     timeout = int(_cfg().get("timeout") or config.shell_timeout())
 
     try:
