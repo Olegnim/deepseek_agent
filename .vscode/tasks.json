@@ -25,7 +25,7 @@
       "label": "DeepSeek: doctor",
       "type": "shell",
       "command": "python",
-      "args": ["${workspaceFolder}/agent.py", "-t", "покажи диагностику окружения"],
+      "args": ["${workspaceFolder}/agent.py", "--doctor"],
       "presentation": { "panel": "new", "reveal": "always" },
       "problemMatcher": []
     }

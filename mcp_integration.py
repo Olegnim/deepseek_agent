@@ -7,14 +7,16 @@
 """
 
 import json
-import os
-import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+# Раскрытие ${env:VAR} / ${project_root} / ${agent_home} живёт в config.py,
+# чтобы не дублировать одну и ту же логику в двух модулях.
+from config import expand_vars as substitute
 
 
 # ---------- Модель конфигурации ----------
@@ -159,34 +161,6 @@ class MCPManager:
             await self._exit_stack.aclose()
         except Exception as e:
             print(f"[MCP] ошибка при закрытии: {e}")
-
-
-# ---------- Загрузка конфига ----------
-
-_VAR_RE = re.compile(r"\$\{([^{}]+)\}")
-
-
-def substitute(value: Any, variables: dict[str, str] | None = None) -> Any:
-    """Раскрывает ${var} в строках/списках/словарях.
-
-    Поддерживаются переменные из переданного словаря и ${env:VAR_NAME}.
-    Так в mcp_config.json можно писать "${project_root}" вместо D:/...
-    """
-    variables = variables or {}
-
-    if isinstance(value, str):
-        def repl(match: re.Match) -> str:
-            key = match.group(1).strip()
-            if key.startswith("env:"):
-                return os.environ.get(key[4:].strip(), "")
-            return str(variables.get(key, ""))
-
-        return _VAR_RE.sub(repl, value)
-    if isinstance(value, list):
-        return [substitute(v, variables) for v in value]
-    if isinstance(value, dict):
-        return {k: substitute(v, variables) for k, v in value.items()}
-    return value
 
 
 # ---------- Загрузка конфига ----------

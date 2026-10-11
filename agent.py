@@ -11,13 +11,15 @@ DeepSeek CLI Agent для написания PHP/Python кода.
 - спиннер, цветной вывод, статистика токенов и размера контекста.
 """
 
-import os
 import re
+import os
 import sys
 import json
+import time
+import shutil
 import argparse
 import asyncio
-import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from openai import OpenAI
@@ -46,7 +48,7 @@ except ImportError:
 # --- UI: prompt_toolkit (опционально) ---
 try:
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.history import FileHistory
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.patch_stdout import patch_stdout
     HAS_PT = True
@@ -63,14 +65,19 @@ from config import (
     CONFIG_PATH,
     agent_home,
     backup_dir,
+    cache_dir,
     mcp_config_paths,
     plugins_candidates,
     skills_candidates,
     settings_summary,
     variables as config_variables,
     setup as config_setup,
+    max_steps as config_max_steps,
+    api_retries as config_api_retries,
+    web_settings as config_web_settings,
 )
-from tools import TOOLS, REGISTRY
+from tools import TOOLS, REGISTRY, WEB_TOOLS, GIT_TOOLS, PATH_TOOLS
+from tools.filesystem import project_outline
 from skills_loader import load_skill_map
 from mcp_integration import MCPManager, load_mcp_servers
 
@@ -170,6 +177,9 @@ TOKEN_STATS = {
 CONTEXT_SIZE = 0
 CONTEXT_LIMIT = CONTEXT_LIMIT or 0
 
+# Сколько символов результата инструмента уходит в контекст.
+TOOL_RESULT_LIMIT = 8000
+
 
 # ---------- Вспомогательные функции ----------
 
@@ -246,12 +256,9 @@ def build_system_prompt() -> str:
     skills = load_project_skills()
 
     try:
-        cmd = ["cmd", "/c", "dir", "/b"] if os.name == "nt" else ["ls", "-1"]
-        tree = subprocess.run(
-            cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=10
-        ).stdout.strip()
+        tree = project_outline(PROJECT_ROOT, depth=2)
     except Exception:
-        tree = "(не удалось получить список файлов)"
+        tree = "(не удалось получить структуру проекта)"
 
     mcp_info = ""
     if mcp_manager and mcp_manager.get_tools():
@@ -266,18 +273,26 @@ def build_system_prompt() -> str:
             "Откатить правку — команда :restore."
         )
 
+    web_info = ""
+    if config_web_settings().get("enabled", True):
+        web_info = (
+            "\n- искать в интернете (web_search) и читать страницы (fetch_url) — "
+            "для проверки версий, синтаксиса библиотек и сообщений об ошибках;"
+        )
+
     return f"""Ты CLI-агент для написания PHP и Python кода на Windows.
 Ты работаешь с проектом в директории: {PROJECT_ROOT}
 Настройки и все пути задаются в одном редактируемом файле: {CONFIG_PATH}
 (команда :config показывает текущие значения).
 
-Верхний уровень проекта:
+Структура проекта (до 2 уровней; полный список — list_dir):
 {tree}
 
 Твои возможности:
 - читать, писать и точечно редактировать файлы;
 - искать по коду регулярными выражениями;
 - запускать shell-команды (php -l, node --check, python -m pytest);
+- смотреть состояние репозитория: git_status, git_diff, git_log;{web_info}
 - использовать инструменты MCP-серверов, если они подключены;
 - следовать правилам навыков, описанных ниже.
 {mcp_info}{snapshot_info}
@@ -295,6 +310,12 @@ def build_system_prompt() -> str:
 
 - Прочитать середину большого файла (когда read_file обрезает):
   read_range("путь", 400, 600)
+
+- Переименовать во всех местах файла:
+  edit_file(path=..., old_text=..., new_text=..., replace_all=true)
+
+- Понять, что уже изменено:
+  git_status(), затем git_diff() или git_diff(path="src/Foo.php")
 
 Правила:
 - Отвечай кратко, на русском.
@@ -324,10 +345,17 @@ def build_system_prompt() -> str:
 
 def build_tools_list() -> list[dict]:
     """Объединяет встроенные инструменты и MCP-инструменты,
-    убирая дубликаты по имени (приоритет — встроенным)."""
+    убирая дубликаты по имени (приоритет — встроенным).
+
+    Инструменты, которые сейчас неприменимы (веб выключен в конфиге,
+    проект не под git), не отдаются модели, чтобы не тратить контекст.
+    """
     all_tools = list(TOOLS)
     if mcp_manager:
         all_tools += mcp_manager.get_tools()
+
+    web_on = bool(config_web_settings().get("enabled", True))
+    git_on = (PROJECT_ROOT / ".git").exists()
 
     seen: set[str] = set()
     deduped: list[dict] = []
@@ -337,9 +365,41 @@ def build_tools_list() -> list[dict]:
             continue
         if name in seen:
             continue
+        if not web_on and name in WEB_TOOLS:
+            continue
+        if not git_on and name in GIT_TOOLS:
+            continue
         seen.add(name)
         deduped.append(tool)
     return deduped
+
+
+# ---------- Лог сессии (для отладки) ----------
+
+LOG_PATH: Path | None = None
+
+
+def _open_session_log() -> None:
+    """Открывает файл лога сессии в <project>/.agent-cache/logs/."""
+    global LOG_PATH
+    try:
+        logs = cache_dir(PROJECT_ROOT) / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        LOG_PATH = logs / f"session-{datetime.now():%Y-%m-%d-%H%M%S}.log"
+        log_line("session", f"agent.py start, project={PROJECT_ROOT}, model={MODEL}")
+    except OSError:
+        LOG_PATH = None
+
+
+def log_line(kind: str, text: str) -> None:
+    """Пишет строку в лог сессии (ошибки логирования игнорируются)."""
+    if not LOG_PATH:
+        return
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now():%H:%M:%S}] {kind}: {text}\n")
+    except OSError:
+        pass
 
 
 # ---------- Выполнение инструментов ----------
@@ -347,6 +407,10 @@ def build_tools_list() -> list[dict]:
 async def execute_tool(name: str, args: dict) -> str:
     # ---- Встроенные инструменты ----
     if name in REGISTRY:
+        # Для инструментов с путями по умолчанию считаем от корня проекта,
+        # а не от cwd процесса: иначе "." зависел бы от того, откуда запущен агент.
+        if name in PATH_TOOLS:
+            args.setdefault("path", str(PROJECT_ROOT))
         if "path" in args:
             try:
                 args["path"] = str(safe_path(args["path"]))
@@ -444,43 +508,80 @@ def print_stats(full: bool = False) -> None:
         ui_status(_session_stats())
 
 
-async def _call_model(messages: list, all_tools: list):
+def _api_request(messages: list, all_tools: list):
+    """Один (блокирующий) запрос к API. Со спиннером, если есть rich."""
     if console:
         spinner = Spinner("dots", text=Text(" DeepSeek думает...", style="dim"))
         with Live(spinner, console=console, refresh_per_second=10, transient=True):
-            try:
-                return client.chat.completions.create(
-                    model=MODEL,
-                    messages=messages,
-                    tools=all_tools,
-                    tool_choice="auto",
-                    temperature=TEMPERATURE,
-                )
-            except Exception as e:
-                ui_error(f"API: {type(e).__name__}: {e}")
-                return None
-    else:
-        print("... DeepSeek думает", end="", flush=True)
-        try:
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                tools=all_tools,
-                tool_choice="auto",
-                temperature=TEMPERATURE,
+            return client.chat.completions.create(
+                model=MODEL, messages=messages, tools=all_tools,
+                tool_choice="auto", temperature=TEMPERATURE,
             )
-            print("\r", end="")
-            return response
+    print("... DeepSeek думает", end="", flush=True)
+    try:
+        return client.chat.completions.create(
+            model=MODEL, messages=messages, tools=all_tools,
+            tool_choice="auto", temperature=TEMPERATURE,
+        )
+    finally:
+        print("\r", end="")
+
+
+async def _call_model(messages: list, all_tools: list):
+    """Запрос к DeepSeek с повторами при сетевых ошибках/429.
+
+    Количество попыток — agent.api_retries. Задержка растёт: 1с, 2с, 4с...
+    """
+    attempts = max(1, config_api_retries())
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return _api_request(messages, all_tools)
         except Exception as e:
-            print()
-            ui_error(f"API: {type(e).__name__}: {e}")
-            return None
+            last_error = e
+            if attempt == attempts or not _is_retryable(e):
+                break
+            delay = 2 ** (attempt - 1)
+            ui_info(f"API-сбой ({type(e).__name__}), повтор "
+                    f"{attempt}/{attempts - 1} через {delay} с")
+            await asyncio.sleep(delay)
+
+    ui_error(f"API: {type(last_error).__name__}: {last_error}")
+    log_line("api-error", f"{type(last_error).__name__}: {last_error}")
+    return None
+
+
+def _is_retryable(error: Exception) -> bool:
+    """Стоит ли повторять запрос: сетевые ошибки, 429 и 5xx."""
+    status = getattr(error, "status_code", None)
+    if status in (408, 409, 429):
+        return True
+    if isinstance(status, int) and 500 <= status < 600:
+        return True
+    name = type(error).__name__
+    return name in {
+        "APIConnectionError", "APITimeoutError", "RateLimitError",
+        "InternalServerError", "Timeout", "ConnectTimeout",
+    }
 
 
 async def _run_loop(messages: list) -> None:
     all_tools = build_tools_list()
+    max_steps = max(1, config_max_steps())
+    step = 0
 
     while True:
+        step += 1
+        if step > max_steps:
+            ui_error(
+                f"Достигнут лимит шагов ({max_steps}) — останавливаюсь, "
+                "чтобы не зациклиться. Уточните задачу или увеличьте "
+                "agent.max_steps в agent.config.json."
+            )
+            log_line("limit", f"max_steps={max_steps} reached")
+            return
+
         response = await _call_model(messages, all_tools)
         if response is None:
             return
@@ -496,6 +597,7 @@ async def _run_loop(messages: list) -> None:
         if not msg.tool_calls:
             print()
             ui_print(msg.content or "(пустой ответ)", style="markdown")
+            log_line("assistant", (msg.content or "")[:1000].replace("\n", " "))
             print()
             print_stats()
             print()
@@ -511,13 +613,22 @@ async def _run_loop(messages: list) -> None:
                 args = {}
 
             ui_tool_call(name, args)
+            log_line("tool", f"{name}({json.dumps(args, ensure_ascii=False)[:500]})")
+
             result = await execute_tool(name, args)
             ui_tool_result(name, result)
+            log_line("result", str(result)[:1000].replace("\n", " "))
+
+            content = str(result)[:TOOL_RESULT_LIMIT]
+            if len(str(result)) > TOOL_RESULT_LIMIT:
+                content += (f"\n\n[... результат обрезан: показано "
+                            f"{TOOL_RESULT_LIMIT} из {len(str(result))} символов. "
+                            "Сузь запрос или читай частями через read_range.]")
 
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.id,
-                "content": result[:8000],
+                "content": content,
             })
 
 
@@ -529,17 +640,25 @@ def cmd_help() -> None:
   [cyan]:clear[/cyan]             — очистить историю диалога
   [cyan]:tokens[/cyan]            — статистика токенов за сессию
   [cyan]:context[/cyan]           — размер текущего контекста
-  [cyan]:tools[/cyan]             — доступные инструменты
+  [cyan]:tools[/cyan]             — доступные инструменты (вкл. web и git)
   [cyan]:skills[/cyan]            — загруженные навыки
   [cyan]:mcp[/cyan]               — статус MCP-серверов
   [cyan]:snapshots[/cyan]         — список снапшотов
   [cyan]:restore[/cyan]           — восстановить последний снапшот
   [cyan]:auto[/cyan]              — переключить режим подтверждений
   [cyan]:project[/cyan]           — показать корень проекта
+  [cyan]:log[/cyan]               — путь к логу текущей сессии
   [cyan]:doctor[/cyan]            — диагностика (config, skills, mcp, утилиты)
   [cyan]:config[/cyan]            — путь к agent.config.json и текущие настройки
   [cyan]:exit[/cyan] или exit     — выход
 """)
+
+
+def cmd_log() -> None:
+    if LOG_PATH:
+        ui_info(f"Лог сессии: {LOG_PATH}")
+    else:
+        ui_info("Лог сессии недоступен (не удалось создать файл).")
 
 
 def cmd_tokens() -> None:
@@ -659,7 +778,6 @@ def cmd_restore() -> None:
         ui_info("Отменено.")
         return
 
-    import shutil
     restored = 0
     for f in files:
         rel = f.relative_to(latest)
@@ -678,8 +796,6 @@ def cmd_auto() -> None:
 
 
 def cmd_doctor() -> None:
-    import shutil
-
     ui_print("[bold]Диагностика агента[/bold]\n")
     ui_print(f"[cyan]AGENT_HOME:[/cyan]   {agent_home()}")
     ui_print(f"[cyan]agent.py:[/cyan]     {Path(__file__).resolve()}")
@@ -769,6 +885,34 @@ def cmd_doctor() -> None:
         color = "green" if found else "dim"
         ui_print(f"  [{color}]{mark}[/{color}] {name}" +
                  (f"  {found}" if found else ""))
+    print()
+
+    ui_print("[bold]Пакеты Python[/bold]")
+    import importlib.util
+
+    for module, required in (("openai", True), ("mcp", True),
+                             ("rich", False), ("prompt_toolkit", False)):
+        found = importlib.util.find_spec(module) is not None
+        if found:
+            ui_print(f"  [green]✓[/green] {module}")
+        elif required:
+            ui_print(f"  [red]✗ {module} — обязателен. "
+                     "Установите: pip install -r requirements.txt[/red]")
+        else:
+            ui_print(f"  [yellow]~[/yellow] {module} — не установлен "
+                     "(необязателен, будет упрощённый режим)")
+    print()
+
+    ui_print("[bold]API-ключ[/bold]")
+    env_name = app_config.API.get("api_key_env") or "DEEPSEEK_API_KEY"
+    if API_KEY:
+        source = "из переменной окружения" if os.environ.get(env_name) \
+            else "из .agent.config.json"
+        ui_print(f"  [green]✓[/green] задан ({source}, {env_name})")
+    else:
+        ui_print("  [red]✗ не найден[/red] — задайте DEEPSEEK_API_KEY "
+                 "или api.api_key в .agent.config.json")
+    ui_print(f"  модель: {MODEL}   base_url: {BASE_URL}")
 
 
 def cmd_config() -> None:
@@ -806,6 +950,8 @@ async def handle_command(cmd: str, messages: list) -> bool:
         cmd_auto()
     elif c == ":project":
         ui_info(f"Проект: {PROJECT_ROOT}")
+    elif c == ":log":
+        cmd_log()
     elif c == ":doctor":
         cmd_doctor()
     elif c == ":config":
@@ -823,7 +969,9 @@ async def repl(system_prompt: str) -> None:
     session = None
     if HAS_PT:
         try:
-            session = PromptSession(history=InMemoryHistory())
+            history_file = cache_dir(PROJECT_ROOT) / "history.txt"
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            session = PromptSession(history=FileHistory(str(history_file)))
         except Exception as e:
             # Нет настоящей консоли (пайп, CI, удалённый терминал) —
             # продолжаем с простым input().
@@ -833,6 +981,8 @@ async def repl(system_prompt: str) -> None:
 
     ui_print("[bold cyan]DeepSeek Agent[/bold cyan] — интерактивный режим")
     ui_info("Введите задачу или :help для списка команд. Выход — :exit или Ctrl+D.")
+    if LOG_PATH:
+        ui_info(f"лог сессии: {LOG_PATH}")
     print()
 
     while True:
@@ -863,6 +1013,7 @@ async def repl(system_prompt: str) -> None:
             continue
 
         messages.append({"role": "user", "content": user_input})
+        log_line("user", user_input[:500].replace("\n", " "))
         try:
             await _run_loop(messages)
         except KeyboardInterrupt:
@@ -874,6 +1025,14 @@ async def repl(system_prompt: str) -> None:
 
 async def main_async(args) -> None:
     global PROJECT_ROOT, CONFIRM_MODE, mcp_manager
+
+    # Диагностика работает без API-ключа: удобно проверить установку сразу
+    # после клонирования, до настройки ключа.
+    if args.doctor:
+        PROJECT_ROOT = config_setup(args.project_root)
+        _open_session_log()
+        cmd_doctor()
+        return
 
     if not API_KEY:
         ui_error("Переменная окружения DEEPSEEK_API_KEY не установлена.")
@@ -892,6 +1051,8 @@ async def main_async(args) -> None:
 
     if args.no_confirm or args.yes:
         CONFIRM_MODE = False
+
+    _open_session_log()
 
     ui_print(f"[bold]DeepSeek Agent[/bold]  ·  проект: [cyan]{PROJECT_ROOT}[/cyan]")
     ui_print(f"                ·  модель: [cyan]{MODEL}[/cyan]  "
@@ -934,6 +1095,7 @@ async def main_async(args) -> None:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": args.task},
             ]
+            log_line("user", args.task[:500].replace("\n", " "))
             await _run_loop(messages)
             if args.show_tokens:
                 print()
@@ -961,6 +1123,9 @@ def main():
                         help="Алиас --no-confirm (для CI/автоматизации).")
     parser.add_argument("--show-tokens", action="store_true",
                         help="Показать статистику токенов после разовой задачи.")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Показать диагностику (пути, конфиги, навыки, MCP, "
+                             "наличие утилит) и выйти. API-ключ не нужен.")
     args = parser.parse_args()
 
     try:

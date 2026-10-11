@@ -22,5 +22,18 @@
   },
   "snapshots": {
     "max_backups": 50
+  },
+  "agent": {
+    "max_steps": 25,
+    "api_retries": 3
+  },
+  "tools": {
+    "shell_timeout": 60,
+    "web": {
+      "enabled": true,
+      "timeout": 20,
+      "max_chars": 20000,
+      "results": 5
+    }
   }
 }

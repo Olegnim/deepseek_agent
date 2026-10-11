@@ -13,15 +13,16 @@ import config
 
 
 def run_shell(command: str) -> str:
-    """Запускает shell-команду с ограничением по времени.
+    """Запускает shell-команду с ограничением по времени (tools.shell_timeout).
     При таймауте убивает всю группу процессов, а не только родителя."""
+    timeout = config.shell_timeout()
     try:
         working_dir = config.PROJECT_ROOT
         kwargs = dict(
             shell=True,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,   # <-- важно: не давать потомкам читать stdin
             cwd=str(working_dir) if working_dir.is_dir() else None,
         )
@@ -44,7 +45,7 @@ def run_shell(command: str) -> str:
                 )
             except Exception:
                 pass
-        return "ERROR: команда не завершилась за 60 секунд и была прервана."
+        return f"ERROR: команда не завершилась за {timeout} секунд и была прервана."
 
     except Exception as e:
         return f"ERROR: {type(e).__name__}: {e}"

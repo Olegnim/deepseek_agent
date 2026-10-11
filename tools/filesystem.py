@@ -98,20 +98,95 @@ def write_file(path: str, content: str) -> str:
     return f"Записано {len(content)} символов в {path}"
 
 
-def edit_file(path: str, old_text: str, new_text: str) -> str:
-    """Заменяет первое вхождение old_text на new_text.
-    Удобнее, чем write_file, когда нужно точечное изменение."""
+def edit_file(path: str, old_text: str, new_text: str,
+              replace_all: bool = False) -> str:
+    """Заменяет old_text на new_text.
+
+    replace_all=False (по умолчанию) — только первое вхождение.
+    Переводы строк в файле сохраняются (CRLF/LF), сравнение идёт
+    по нормализованному тексту, поэтому фрагмент из модели с \\n
+    найдётся и в файле с \\r\\n.
+    """
     p = Path(path)
     if not p.is_file():
         return f"ERROR: файл не найден: {path}"
-    with open(p, "r", encoding="utf-8") as f:
+    if not old_text:
+        return "ERROR: old_text пуст."
+
+    with open(p, "r", encoding="utf-8", newline="") as f:
         source = f.read()
-    if old_text not in source:
-        return f"ERROR: фрагмент для замены не найден в {path}"
-    updated = source.replace(old_text, new_text, 1)
-    with open(p, "w", encoding="utf-8", newline="\n") as f:
-        f.write(updated)
-    return f"Заменено в {path} ({len(old_text)} -> {len(new_text)} символов)"
+
+    eol = "\r\n" if "\r\n" in source else "\n"
+    norm_source = source.replace("\r\n", "\n")
+    norm_old = old_text.replace("\r\n", "\n")
+    norm_new = new_text.replace("\r\n", "\n")
+
+    found = norm_source.count(norm_old)
+    if found == 0:
+        return (f"ERROR: фрагмент для замены не найден в {path}. "
+                "Прочитай файл заново (read_file/read_range) и скопируй "
+                "текст точно, включая отступы.")
+
+    updated = norm_source.replace(norm_old, norm_new, -1 if replace_all else 1)
+    with open(p, "w", encoding="utf-8", newline="") as f:
+        f.write(updated.replace("\n", eol))
+
+    replaced = found if replace_all else 1
+    note = f" (всего вхождений: {found})" if found > 1 and not replace_all else ""
+    return (f"Заменено в {path}: {replaced} шт. "
+            f"({len(old_text)} -> {len(new_text)} символов){note}")
+
+
+# Папки, которые не показываем в обзоре структуры проекта.
+SKIP_DIRS = {
+    ".git", "node_modules", "vendor", "__pycache__", ".venv", "venv",
+    ".agent-cache", ".idea", ".vscode", "dist", "build", ".next",
+    ".cache", ".mypy_cache", ".pytest_cache", "coverage", ".tox",
+}
+
+
+def project_outline(root: str = ".", depth: int = 2,
+                    max_entries: int = 120) -> str:
+    """Короткий обзор структуры проекта для системного промпта.
+
+    Показывает папки и файлы до глубины depth, пропуская мусорные каталоги.
+    Вывод ограничен max_entries строками, чтобы не раздувать контекст.
+    """
+    base = Path(root)
+    if not base.is_dir():
+        return "(не удалось прочитать структуру проекта)"
+
+    lines: list[str] = []
+
+    def walk(directory: Path, level: int, prefix: str) -> None:
+        if len(lines) >= max_entries:
+            return
+        try:
+            entries = sorted(
+                directory.iterdir(),
+                key=lambda x: (x.is_file(), x.name.lower()),
+            )
+        except OSError:
+            return
+        for item in entries:
+            if len(lines) >= max_entries:
+                return
+            if item.name in SKIP_DIRS or item.name.startswith(".agent-cache"):
+                continue
+            if item.is_dir():
+                lines.append(f"{prefix}{item.name}/")
+                if level < depth:
+                    walk(item, level + 1, prefix + "  ")
+            else:
+                lines.append(f"{prefix}{item.name}")
+
+    walk(base, 1, "")
+    if not lines:
+        return "(проект пуст)"
+    if len(lines) >= max_entries:
+        lines.append(f"... (обрезано на {max_entries} записях, "
+                     f"полный список — list_dir)")
+    return "\n".join(lines)
 
 
 def list_dir(path: str = ".") -> str:

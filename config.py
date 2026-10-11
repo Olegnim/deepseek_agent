@@ -83,6 +83,24 @@ DEFAULTS: dict = {
     "snapshots": {
         "max_backups": 50,
     },
+    "agent": {
+        # Максимум шагов модели (запросов к API) на одну задачу.
+        # Защита от зацикливания, когда модель повторяет один и тот же вызов.
+        "max_steps": 25,
+        # Сколько раз повторять запрос к API при сетевой ошибке/429.
+        "api_retries": 3,
+    },
+    "tools": {
+        # Таймаут shell-команд, секунды.
+        "shell_timeout": 60,
+        # Встроенный доступ в интернет (tools/web.py): fetch_url + web_search.
+        "web": {
+            "enabled": True,
+            "timeout": 20,        # таймаут одного HTTP-запроса, сек
+            "max_chars": 20000,   # сколько символов страницы отдавать модели
+            "results": 5,         # сколько результатов поиска возвращать
+        },
+    },
 }
 
 _VAR_RE = re.compile(r"\$\{([^{}]+)\}")
@@ -106,6 +124,7 @@ def deep_merge(base: dict, extra: dict) -> dict:
 
 def expand_vars(value, variables: dict) -> object:
     """Раскрывает ${env:VAR}, ${agent_home}, ${project_root} в строках/списках/dict."""
+    variables = variables or {}
     if isinstance(value, str):
         def repl(match: re.Match) -> str:
             key = match.group(1).strip()
@@ -191,8 +210,10 @@ def setup(cli_project_root: str | None = None) -> Path:
     Вызывается автоматически при импорте и повторно из agent.main() (когда
     передан флаг -p или нужен свежий расчёт после смены cwd).
     """
-    global SETTINGS, API, PATHS, SNAPSHOTS, PROJECT_ROOT, LOADED_CONFIGS
+    global SETTINGS, API, PATHS, SNAPSHOTS, AGENT_CFG, TOOLS_CFG, WEB
+    global PROJECT_ROOT, LOADED_CONFIGS
     global API_KEY, BASE_URL, MODEL, TEMPERATURE, CONTEXT_LIMIT, MAX_BACKUPS
+    global MAX_STEPS, API_RETRIES, SHELL_TIMEOUT
 
     root = resolve_project_root(cli_project_root)
 
@@ -229,6 +250,9 @@ def setup(cli_project_root: str | None = None) -> Path:
     API = merged.get("api", {})
     PATHS = merged.get("paths", {})
     SNAPSHOTS = merged.get("snapshots", {})
+    AGENT_CFG = merged.get("agent", {})
+    TOOLS_CFG = merged.get("tools", {})
+    WEB = deep_merge(DEFAULTS["tools"]["web"], TOOLS_CFG.get("web") or {})
     PROJECT_ROOT = root
     LOADED_CONFIGS = loaded
 
@@ -242,6 +266,9 @@ def setup(cli_project_root: str | None = None) -> Path:
     TEMPERATURE = float(API.get("temperature", DEFAULTS["api"]["temperature"]))
     CONTEXT_LIMIT = int(API.get("context_limit") or 0)
     MAX_BACKUPS = int(SNAPSHOTS.get("max_backups") or DEFAULTS["snapshots"]["max_backups"])
+    MAX_STEPS = int(AGENT_CFG.get("max_steps") or DEFAULTS["agent"]["max_steps"])
+    API_RETRIES = int(AGENT_CFG.get("api_retries") or DEFAULTS["agent"]["api_retries"])
+    SHELL_TIMEOUT = int(TOOLS_CFG.get("shell_timeout") or DEFAULTS["tools"]["shell_timeout"])
     return root
 
 
@@ -268,6 +295,9 @@ SETTINGS: dict = {}
 API: dict = {}
 PATHS: dict = {}
 SNAPSHOTS: dict = {}
+AGENT_CFG: dict = {}
+TOOLS_CFG: dict = {}
+WEB: dict = {}
 PROJECT_ROOT: Path = Path.cwd()
 API_KEY: str = ""
 BASE_URL: str = ""
@@ -275,6 +305,9 @@ MODEL: str = ""
 TEMPERATURE: float = 0.2
 CONTEXT_LIMIT: int = 0
 MAX_BACKUPS: int = 50
+MAX_STEPS: int = 25
+API_RETRIES: int = 3
+SHELL_TIMEOUT: int = 60
 
 setup()
 
@@ -370,6 +403,40 @@ def max_backups() -> int:
     return MAX_BACKUPS
 
 
+def max_steps() -> int:
+    """Максимум шагов модели на одну задачу (защита от зацикливания)."""
+    return MAX_STEPS
+
+
+def api_retries() -> int:
+    """Сколько раз повторять запрос к API при сбое."""
+    return API_RETRIES
+
+
+def shell_timeout() -> int:
+    """Таймаут shell-команд в секундах."""
+    return SHELL_TIMEOUT
+
+
+def web_settings() -> dict:
+    """Настройки встроенного веб-доступа (fetch_url / web_search)."""
+    return WEB
+
+
+def agent_home_path() -> Path:
+    """Псевдоним agent_home() для ясности в новых модулях."""
+    return AGENT_HOME
+
+
+def cache_dir(project_root: str | os.PathLike | None = None) -> Path:
+    """Папка служебных данных агента в проекте (.agent-cache).
+
+    Внутри неё лежат backups/, history.txt и logs/.
+    """
+    backup = backup_dir(project_root)
+    return backup.parent if backup.name == "backups" else Path(project_root or PROJECT_ROOT) / ".agent-cache"
+
+
 def variables(project_root: str | os.PathLike | None = None) -> dict:
     """Словарь подстановок для MCP-конфигов и шаблонов."""
     root = Path(project_root or PROJECT_ROOT)
@@ -400,6 +467,10 @@ def settings_summary() -> str:
         f"skills_dir:    {', '.join(str(p) for p in skills_candidates()) or 'нет'}",
         f"mcp_config:    {', '.join(str(p) for p in mcp)}",
         f"backup_dir:    {backup_dir()} (max {MAX_BACKUPS})",
+        f"max_steps:     {MAX_STEPS}   (повторов API при сбое: {API_RETRIES})",
+        f"shell_timeout: {SHELL_TIMEOUT} c",
+        f"web:           {'вкл' if WEB.get('enabled', True) else 'выкл'} "
+        f"(timeout {WEB.get('timeout')} c, лимит {WEB.get('max_chars')} симв.)",
     ]
     plugins = plugins_candidates()
     if plugins:
