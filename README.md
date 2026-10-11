@@ -18,17 +18,37 @@ deepseek-agent/                 # = AGENT_HOME, определяется авт�
 │   └── php-conventions/
 │       └── SKILL.md
 ├── plugins/                    # (опционально) доп. модули агента
+├── .agent-cache/backups/       # автоснапшоты правок (создаётся в папке проекта, откат — :restore)
+├── .agent.config.json          # ЛОКАЛЬНЫЙ оверрайд и секреты (в git не попадает)
+├── .vscode/tasks.json          # готовые задачи VS Code для запуска агента
 └── mcp_config.json             # MCP-серверы (пути — через ${project_root})
 ```
 
 Рабочий проект (`PROJECT_ROOT`) — отдельная папка: он не обязан содержать файлы агента, но может добавить свои `skills/`, `mcp_config.json`, `plugins/` и `.agent.config.json` — всё это подхватится автоматически.
 
+> В примерах ниже путь к папке агента обозначен как `<AGENT_HOME>` — подставьте свой (та папка, где лежит `agent.py`). Путь к рабочему проекту — `<PROJECT_ROOT>` (папка, открытая в VS Code). Реальных путей и ключей в репозитории нет и быть не должно.
 
+
+
+## Быстрый старт
+
+1. Откройте в VS Code **папку своего проекта** (`File → Open Folder…`).
+2. Откройте встроенный терминал (`Terminal → New Terminal`) — он стартует в корне проекта.
+3. Один раз задайте API-ключ (подробнее — раздел 3): `setx DEEPSEEK_API_KEY "sk-..."` и перезапустите терминал.
+4. Запустите агента по его собственному пути, подставив свою папку вместо `<AGENT_HOME>`:
+
+```powershell
+python "<AGENT_HOME>\agent.py" -t "Проверь синтаксис PHP в src и исправь ошибки"
+```
+
+Корень проекта агент берёт из cwd (папка открытого проекта), свою папку — из расположения `agent.py`. Прописывать абсолютные пути в конфигах не нужно.
 
 ### Интерактивный режим
 
+Запускать из встроенного терминала VS Code, открытого на папке **вашего проекта** (см. раздел 4):
+
 ```powershell
-python agent.py
+python "<AGENT_HOME>\agent.py"
 ```
 
 Доступные команды:
@@ -38,14 +58,17 @@ python agent.py
 | `:help` | Справка |
 | `:clear` | Очистить историю диалога |
 | `:tokens` | Статистика токенов за сессию |
+| `:context` | Размер текущего контекста и остаток лимита |
 | `:tools` | Список инструментов |
 | `:skills` | Загруженные навыки (проект + агент) |
 | `:mcp` | Статус MCP-серверов |
+| `:snapshots` | Список автоснапшотов правок |
+| `:restore` | Откатить последний снапшот |
 | `:config` | `agent_home`, `project_root`, прочитанные конфиги, текущие настройки |
 | `:auto` | Вкл/выкл подтверждения |
 | `:project` | Показать корень проекта |
 | `:doctor` | Диагностика (config, skills, mcp, снапшоты, утилиты) |
-| `:exit` | Выход |
+| `:exit` | Выход (также `exit`, `quit`, `:q`) |
 
 ### Дополнительные зависимости для UI
 
@@ -79,15 +102,15 @@ pip install prompt_toolkit rich -i https://mirrors.aliyun.com/pypi/simple/
 
 ### Конфиги (оба необязательны)
 
-**`<AGENT_HOME>/agent.config.json`** — базовые настройки агента:
+**`<AGENT_HOME>/agent.config.json`** — базовые настройки агента. Это шаблон для коммита: путь к ключу здесь задаётся, а сам ключ — нет (значение `api_key` должно быть пустым, секреты храните только в локальном `.agent.config.json`, который уже в `.gitignore`):
 
 ```json
 {
   "api": {
     "api_key_env": "DEEPSEEK_API_KEY",
-    "api_key": "sk-...",
+    "api_key": "",
     "base_url": "https://api.deepseek.com",
-    "model": "deepseek-chat",
+    "model": "deepseek-flash",
     "temperature": 0.2,
     "context_limit": 65536
   },
@@ -102,11 +125,11 @@ pip install prompt_toolkit rich -i https://mirrors.aliyun.com/pypi/simple/
 }
 ```
 
-**`<PROJECT_ROOT>/.agent.config.json`** — необязательный оверрайд для конкретного проекта (подхватывается автоматически, если агент запущен из папки проекта). Пример: другой `model`, свой `backup_dir`:
+**`<PROJECT_ROOT>/.agent.config.json`** — необязательный оверрайд для конкретного проекта (подхватывается автоматически, если агент запущен из папки проекта). Файл **не коммитится** (см. `.gitignore`) — именно здесь держите секреты: `api_key`, свой `temperature`/`backup_dir`:
 
 ```json
 {
-  "api": { "model": "deepseek-chat", "temperature": 0.7 },
+  "api": { "api_key": "sk-ваш-ключ", "temperature": 0.7 },
   "paths": { "backup_dir": ".agent-cache/backups" }
 }
 ```
@@ -119,7 +142,7 @@ pip install prompt_toolkit rich -i https://mirrors.aliyun.com/pypi/simple/
 | `paths.backup_dir` | Куда складывать автоснапшоты (относительный путь — от проекта) |
 | `paths.plugins_dirs` | Папки плагинов/доп. модулей |
 | `snapshots.max_backups` | Сколько последних снапшотов хранить |
-| `api.*` | Ключ (env предпочтительнее), модель, base_url, temperature, лимит контекста |
+| `api.*` | Ключ (env предпочтительнее), модель, base_url, temperature, лимит контекста. Секреты — только в локальном `.agent.config.json` |
 
 **Подстановки внутри строк JSON:** `${env:VAR_NAME}`, `${agent_home}` (синоним `${agent_dir}`), `${project_root}`. Благодаря им `mcp_config.json` не содержит путей:
 
@@ -137,7 +160,7 @@ pip install prompt_toolkit rich -i https://mirrors.aliyun.com/pypi/simple/
 
 **Приоритет настроек:** проектный конфиг > `agent.config.json` > дефолты в `config.py`.
 
-Проверка: `:config` (или `python agent.py -t "покажи конфиг"`) покажет `agent_home`, `project_root`, список прочитанных конфигов и все действующие значения.
+Проверка: `:config` (или `python "<AGENT_HOME>\agent.py" -t "покажи конфиг"`) покажет `agent_home`, `project_root`, список прочитанных конфигов и все действующие значения.
 
 ---
 
@@ -206,7 +229,9 @@ python -c "import openai, mcp; print('openai', openai.__version__); print('mcp o
 
 ## 3. Настройка API-ключа DeepSeek
 
-Ключ берётся из переменной окружения (имя задаётся в `api.api_key_env`, по умолчанию `DEEPSEEK_API_KEY`), а если её нет — из `api.api_key` в `agent.config.json`.
+Ключ берётся из переменной окружения (имя задаётся в `api.api_key_env`, по умолчанию `DEEPSEEK_API_KEY`), а если её нет — из `api.api_key` в **локальном** `.agent.config.json` (он не коммитится, см. `.gitignore`).
+
+> ⚠️ Никогда не публикуйте реальный ключ: `.agent.config.json`, `agent.config.local.json`, `mcp_config.local.json` и `.mcp.json` уже в `.gitignore`. Если ключ всё-таки попал в git или в публичный файл — сразу отзовите его в консоли DeepSeek и выпустите новый.
 
 Рекомендуемый способ — переменная окружения, её достаточно задать **один раз**:
 
@@ -222,27 +247,41 @@ setx DEEPSEEK_API_KEY "sk-ваш-ключ"
 echo $env:DEEPSEEK_API_KEY
 ```
 
-Без ключа в окружении агент возьмёт `api.api_key` из `agent.config.json`.
+Без ключа в окружении агент возьмёт `api.api_key` из локального `.agent.config.json` (в репозиторий его не добавляйте).
 
 ---
 
 ## 4. Запуск
 
-### 4.1. Запуск для проекта по умолчанию
+**Правильный сценарий:** открываете в VS Code **папку своего проекта** (`File → Open Folder…`), затем во встроенном терминале (`Terminal → New Terminal`) запускаете агент по его собственному пути. Терминал VS Code стартует уже в корне проекта, поэтому:
 
-Корень проекта = папка, из которой запущен агент (в VS Code — корень открытого воркспейса):
+- `PROJECT_ROOT` = папка проекта (cwd терминала);
+- `AGENT_HOME` = папка, где лежит `agent.py` (определяется автоматически из его расположения).
+
+```text
+<AGENT_HOME>\                  # папка, где лежит агент (путь подставьте свой)
+└── agent.py
+```
+
+### 4.1. Разовая задача из терминала VS Code открытого проекта
+
+Так выглядит команда: терминал открыт в папке проекта, агент вызывается по своему пути (пути абстрактные — подставьте свои):
 
 ```powershell
-cd D:\xampp\www\sokolovsoftaware.ru
-python D:\Dev\deepseek_agent\agent.py -t "Найди все TODO в src"
+# терминал открыт в <PROJECT_ROOT>, агент лежит в <AGENT_HOME>
+python "<AGENT_HOME>\agent.py" -t "Проверь синтаксис PHP и исправь ошибки"
 ```
+
+Корень проекта агент берёт из cwd, поэтому предыдущий сценарий (`cd <PROJECT_ROOT>` + полный путь к `agent.py`) работает без дополнительных флагов.
+
+> Не нужно `cd` в папку агента: если запустить `python agent.py` **из папки агента**, корнем проекта станет сама папка агента. В этом случае либо задайте `-p <PROJECT_ROOT>`, либо `paths.project_root` / `.agent.config.json`.
 
 ### 4.2. Разовый запуск для другого проекта
 
 Флаг `-p` перекрывает автоопределение:
 
 ```powershell
-python D:\Dev\deepseek_agent\agent.py -p D:\Projects\my-php-app -t "Найди все TODO в src"
+python "<AGENT_HOME>\agent.py" -p "<PROJECT_ROOT>" -t "Найди все TODO в src"
 ```
 
 Агент будет работать внутри указанной папки и не выйдет за её пределы.
@@ -250,7 +289,7 @@ python D:\Dev\deepseek_agent\agent.py -p D:\Projects\my-php-app -t "Найди �
 ### 4.3. Интерактивный режим
 
 ```powershell
-python agent.py
+python "<AGENT_HOME>\agent.py"
 ```
 
 Спросит задачу в начале, потом будет ждать следующую после каждого ответа. Выход — `exit`, `quit` или `:q`.
@@ -258,7 +297,7 @@ python agent.py
 ### 4.4. Без подтверждений (для автоматизации)
 
 ```powershell
-python agent.py -t "Запусти php -l на всех файлах src" --yes
+python "<AGENT_HOME>\agent.py" -t "Запусти php -l на всех файлах src" --yes
 ```
 
 Флаги `--no-confirm` / `--yes` отключают запросы подтверждения для `write_file`, `edit_file` и `run_shell`.
@@ -328,8 +367,8 @@ MCP (Model Context Protocol) позволяет агенту использов�
 Путь приходит из корня проекта — **абсолютные пути в `mcp_config.json` не нужны**. Сервер с `"enabled": false` просто пропускается.
 
 **Обратите внимание:**
-- Можно писать и абсолютный путь: на Windows — через **прямые слэши** (`D:/Projects/app`) или экранированные обратные (`D:\\Projects\\app`). Обычные `D:\Projects\app` в JSON сломают парсинг.
-- Кроме `${project_root}` доступны `${agent_dir}` и `${env:VAR_NAME}`.
+- Абсолютные пути не нужны — используйте `${project_root}`. Если всё же нужен абсолютный путь, в JSON пишите его через **прямые слэши** (`<диск>:/путь/к/проекту`) или экранируйте каждый обратный слэш (`<диск>:\\путь\\к\\проекту`): неэкранированные обратные слэши сломают парсинг JSON.
+- Кроме `${project_root}` доступны `${agent_dir}` (синоним `${agent_home}`) и `${env:VAR_NAME}`.
 - `npx` требует установленного Node.js; `uvx` — установленного `uv`.
 - Первый запуск сервера через `npx`/`uvx` может занять 10–30 секунд — это нормально.
 
@@ -340,15 +379,18 @@ MCP (Model Context Protocol) позволяет агенту использов�
 ```
 [MCP] подключён: filesystem (11 инструментов)
 [MCP] подключён: git (9 инструментов)
-[MCP] всего инструментов: 20
+MCP: 20 инструментов из 2 серверов (mcp_config.json)
 ```
+
+Число инструментов и список найденных конфигов у вас будут свои; статус в любой момент виден по `:mcp`.
 
 Все MCP-инструменты доступны модели наравне с обычными (`read_file`, `grep`, `run_shell` и т.д.).
 
 ### 6.3. Безопасность
 
 - MCP-инструменты, изменяющие файлы или выполняющие команды, проходят через `confirm()`. Отключается флагом `--yes` — используйте только в доверенных сценариях.
-- Сервер `@modelcontextprotocol/server-filesystem` принимает список разрешённых директорий в `args`. Не давайте ему корень диска `C:/` — только папку проекта.
+- Сервер `@modelcontextprotocol/server-filesystem` принимает список разрешённых директорий в `args`. Не давайте ему корень диска (например `C:/`) — только папку проекта.
+- Никогда не коммитьте секреты: `api_key` и локальные оверрайды держите в `.agent.config.json` (он в `.gitignore`).
 
 ---
 
@@ -356,11 +398,20 @@ MCP (Model Context Protocol) позволяет агенту использов�
 
 Файл `.vscode/tasks.json` из этого репозитория уже готов: путь к агенту задан через `${workspaceFolder}`, флага `-p` нет — корень проекта VS Code передаёт сам как cwd задачи. Хардкода диска нет.
 
-Если `tasks.json` лежит в другом проекте, используйте `${env:DEEPSEEK_AGENT_HOME}/agent.py` (задав один раз `setx DEEPSEEK_AGENT_HOME "D:\Dev\deepseek_agent"` и перезапустив VS Code).
+То есть: откройте в VS Code папку **своего проекта** и запускайте задачи — агент сам поймёт, что корень проекта это папка воркспейса. Запуск из встроенного терминала VS Code (Terminal → New Terminal) работает так же: cwd терминала = корень проекта.
+
+Если `tasks.json` лежит в другом проекте, используйте `${env:DEEPSEEK_AGENT_HOME}/agent.py` — один раз задайте переменную с **своим** путём к папке агента и перезапустите VS Code:
+
+```powershell
+setx DEEPSEEK_AGENT_HOME "<AGENT_HOME>"
+```
+
+Пример `tasks.json` (тот же, что в репозитории):
 
 ```json
 {
   "version": "2.0.0",
+  "_comment": "Пути не хардкодятся: корень проекта агент берёт сам из cwd задачи (= папка открытого воркспейса), папку агента вычисляет из расположения agent.py. Флаг -p нужен только для явного переопределения.",
   "tasks": [
     {
       "label": "DeepSeek: run task",
@@ -379,6 +430,14 @@ MCP (Model Context Protocol) позволяет агенту использов�
       "command": "python",
       "args": ["${workspaceFolder}/agent.py"],
       "presentation": { "panel": "dedicated", "reveal": "always" },
+      "problemMatcher": []
+    },
+    {
+      "label": "DeepSeek: doctor",
+      "type": "shell",
+      "command": "python",
+      "args": ["${workspaceFolder}/agent.py", "-t", "покажи диагностику окружения"],
+      "presentation": { "panel": "new", "reveal": "always" },
       "problemMatcher": []
     }
   ],
@@ -415,16 +474,16 @@ MCP (Model Context Protocol) позволяет агенту использов�
 Используйте Aliyun-зеркало: `pip install mcp -i https://mirrors.aliyun.com/pypi/simple/`. Если не помогает — проверьте версию Python (нужна 3.10+).
 
 **`ERROR: переменная окружения DEEPSEEK_API_KEY не установлена`**
-Выполните `setx DEEPSEEK_API_KEY "sk-..."` и **перезапустите PowerShell** — либо впишите ключ в `api.api_key` в `agent.config.json`.
+Выполните `setx DEEPSEEK_API_KEY "sk-..."` и **перезапустите PowerShell** — либо впишите ключ в `api.api_key` в локальном `.agent.config.json` (не в отслеживаемый git `agent.config.json`).
 
 **`[config] ... JSONDecodeError` при старте**
-Сломан один из конфигов (`agent.config.json` / `.agent.config.json`) — лишняя запятая, неэкранированные обратные слэши. Путь указывайте как `D:/xampp/www/app`. Имя битого файла видно в сообщении.
+Сломан один из конфигов (`agent.config.json` / `.agent.config.json`) — лишняя запятая, неэкранированные обратные слэши. Абсолютный путь в JSON указывайте через прямые слэши (`<диск>:/путь/к/проекту`). Имя битого файла видно в сообщении.
 
 **В логе `[MCP] <сервер>: не раскрыта подстановка ${project_root}`**
-Сервер запускается из конфига, где `${project_root}` не во что раскрыть. Убедитесь, что агент запущен (корень определяется из cwd), либо укажите в `mcp_config.json` абсолютный путь.
+Сервер запускается из конфига, где `${project_root}` не во что раскрыть. Запустите агента из папки проекта (или укажите корень через `-p`), чтобы подстановка `${project_root}` раскрылась.
 
 **Агент работает не с тем проектом**
-Корень = папка запуска. Проверьте `:config` (строки `project_root` и `cwd`) — при необходимости задайте `-p`, `DEEPSEEK_PROJECT_ROOT` или `.agent.config.json` в проекте.
+Корень = папка запуска (cwd). Типичная причина — агент запущен из **своей** папки, а не из папки проекта. Проверьте `:config` (строки `project_root` и `cwd`) — при необходимости задайте `-p <PROJECT_ROOT>`, переменную `DEEPSEEK_PROJECT_ROOT` или `.agent.config.json` в проекте.
 
 **MCP-сервер не подключается**
 Проверьте, что `npx` или `uvx` доступны в PATH (`npx --version`). Попробуйте запустить команду сервера вручную из PowerShell — увидите реальную ошибку. Также убедитесь, что `"enabled"` не выставлен в `false`.
