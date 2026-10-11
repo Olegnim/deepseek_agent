@@ -75,9 +75,11 @@ from config import (
     max_steps as config_max_steps,
     api_retries as config_api_retries,
     web_settings as config_web_settings,
+    ask_cache_on_start as config_ask_cache_on_start,
 )
 from tools import TOOLS, REGISTRY, WEB_TOOLS, GIT_TOOLS, PATH_TOOLS
 from tools.filesystem import project_outline
+from tools.cache import cache_overview, clear_cache, format_overview, human_size
 from skills_loader import load_skill_map
 from mcp_integration import MCPManager, load_mcp_servers
 
@@ -145,6 +147,15 @@ def ui_status(status_line: str) -> None:
     ui_print(status_line, style="dim")
 
 
+def _ask(prompt: str) -> str:
+    """Безопасный input(): при отсутствии stdin (пайп, CI) возвращает пустую строку."""
+    try:
+        return input(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
 # ---------- Глобальные переменные ----------
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
@@ -176,6 +187,9 @@ TOKEN_STATS = {
 
 CONTEXT_SIZE = 0
 CONTEXT_LIMIT = CONTEXT_LIMIT or 0
+
+# Спрашивать ли при старте REPL про очистку кэша (снимается флагом --no-cache-ask).
+ASK_CACHE_ON_START = True
 
 # Сколько символов результата инструмента уходит в контекст.
 TOOL_RESULT_LIMIT = 8000
@@ -647,6 +661,7 @@ def cmd_help() -> None:
   [cyan]:restore[/cyan]           — восстановить последний снапшот
   [cyan]:auto[/cyan]              — переключить режим подтверждений
   [cyan]:project[/cyan]           — показать корень проекта
+  [cyan]:cache[/cyan]             — объём кэша (.agent-cache) и очистка
   [cyan]:log[/cyan]               — путь к логу текущей сессии
   [cyan]:doctor[/cyan]            — диагностика (config, skills, mcp, утилиты)
   [cyan]:config[/cyan]            — путь к agent.config.json и текущие настройки
@@ -659,6 +674,57 @@ def cmd_log() -> None:
         ui_info(f"Лог сессии: {LOG_PATH}")
     else:
         ui_info("Лог сессии недоступен (не удалось создать файл).")
+
+
+def cmd_cache(force: bool = False) -> None:
+    """Показывает объём кэша и (после подтверждения) чистит его.
+
+    Кэш — это `.agent-cache` в проекте: снапшоты правок, логи сессий и
+    история ввода. Чистка ускоряет grep/read_file и не даёт мусору
+    попадать в контекст модели.
+    """
+    info = cache_overview(PROJECT_ROOT)
+    ui_print("[bold]Кэш агента[/bold]")
+    for line in format_overview(info).splitlines():
+        ui_print(f"  {line}")
+    if info["total_items"] == 0:
+        ui_info("Кэш пуст — очищать нечего.")
+        return
+
+    if not force:
+        ans = _ask("Очистить кэш (снапшоты, логи, история ввода)? (y/n): ")
+        if ans != "y":
+            ui_info("Оставлено без изменений.")
+            return
+
+    ui_print(clear_cache(PROJECT_ROOT), style="green")
+    ui_info("Учтите: откат :restore для удалённых снапшотов больше недоступен.")
+
+
+def maybe_ask_cache_clear() -> None:
+    """Спрашивает при старте REPL, стоит ли очистить кэш.
+
+    Отключается флагом --no-cache-ask или ключом cache.ask_on_start в конфиге.
+    """
+    if not config_ask_cache_on_start():
+        return
+    info = cache_overview(PROJECT_ROOT)
+    if info["total_items"] == 0:
+        return
+
+    ui_print(
+        f"[bold]Кэш проекта[/bold]: снапшотов {info['backups']['count']}, "
+        f"логов {info['logs']['count']}, "
+        f"история ввода — {'есть' if info['history']['count'] else 'нет'} "
+        f"(всего {human_size(info['total_bytes'])})",
+        style="dim",
+    )
+    ans = _ask("Очистить кэш перед началом работы? "
+               "[Enter] — оставить, y — очистить: ")
+    if ans == "y":
+        ui_print(clear_cache(PROJECT_ROOT), style="green")
+    else:
+        ui_info("Кэш оставлен. Очистить в любой момент — команда :cache.")
 
 
 def cmd_tokens() -> None:
@@ -867,6 +933,10 @@ def cmd_doctor() -> None:
             ui_print(f"  ~ модуль подключён, снапшотов пока нет  ({backup})")
     else:
         ui_print("  ✗ tools/snapshot.py не найден", style="red")
+    cache_info = cache_overview(PROJECT_ROOT)
+    ui_print(f"  кэш: {cache_info['total_items']} файлов, "
+             f"{human_size(cache_info['total_bytes'])}  ({cache_info['dir']})")
+    ui_print("  очистка: :cache, :cache clear или флаг --clear-cache", style="dim")
     print()
 
     ui_print("[bold]Плагины[/bold]")
@@ -950,6 +1020,15 @@ async def handle_command(cmd: str, messages: list) -> bool:
         cmd_auto()
     elif c == ":project":
         ui_info(f"Проект: {PROJECT_ROOT}")
+    elif c == ":cache":
+        cmd_cache()
+    elif c.startswith(":cache "):
+        # :cache clear — очистить без вопросов
+        arg = c.split(None, 1)[1].strip()
+        if arg in ("clear", "clean", "y", "yes"):
+            cmd_cache(force=True)
+        else:
+            ui_error("Использование: :cache  или  :cache clear")
     elif c == ":log":
         cmd_log()
     elif c == ":doctor":
@@ -984,6 +1063,10 @@ async def repl(system_prompt: str) -> None:
     if LOG_PATH:
         ui_info(f"лог сессии: {LOG_PATH}")
     print()
+
+    if ASK_CACHE_ON_START:
+        maybe_ask_cache_clear()
+        print()
 
     while True:
         try:
@@ -1024,13 +1107,15 @@ async def repl(system_prompt: str) -> None:
 # ---------- Точка входа ----------
 
 async def main_async(args) -> None:
-    global PROJECT_ROOT, CONFIRM_MODE, mcp_manager
+    global PROJECT_ROOT, CONFIRM_MODE, mcp_manager, ASK_CACHE_ON_START
 
     # Диагностика работает без API-ключа: удобно проверить установку сразу
     # после клонирования, до настройки ключа.
     if args.doctor:
         PROJECT_ROOT = config_setup(args.project_root)
         _open_session_log()
+        if args.clear_cache:
+            ui_print(clear_cache(PROJECT_ROOT), style="green")
         cmd_doctor()
         return
 
@@ -1052,7 +1137,14 @@ async def main_async(args) -> None:
     if args.no_confirm or args.yes:
         CONFIRM_MODE = False
 
+    if args.no_cache_ask:
+        ASK_CACHE_ON_START = False
+
     _open_session_log()
+
+    if args.clear_cache:
+        ui_print(clear_cache(PROJECT_ROOT), style="green")
+        log_line("cache", "cleared by --clear-cache")
 
     ui_print(f"[bold]DeepSeek Agent[/bold]  ·  проект: [cyan]{PROJECT_ROOT}[/cyan]")
     ui_print(f"                ·  модель: [cyan]{MODEL}[/cyan]  "
@@ -1126,6 +1218,11 @@ def main():
     parser.add_argument("--doctor", action="store_true",
                         help="Показать диагностику (пути, конфиги, навыки, MCP, "
                              "наличие утилит) и выйти. API-ключ не нужен.")
+    parser.add_argument("--clear-cache", action="store_true",
+                        help="Очистить кэш проекта (.agent-cache: снапшоты, логи, "
+                             "история ввода) перед запуском, без вопросов.")
+    parser.add_argument("--no-cache-ask", action="store_true",
+                        help="Не спрашивать при старте про очистку кэша.")
     args = parser.parse_args()
 
     try:

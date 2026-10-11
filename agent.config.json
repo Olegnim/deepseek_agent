@@ -23,6 +23,9 @@
   "snapshots": {
     "max_backups": 50
   },
+  "cache": {
+    "ask_on_start": true
+  },
   "agent": {
     "max_steps": 25,
     "api_retries": 3

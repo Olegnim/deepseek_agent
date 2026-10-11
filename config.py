@@ -83,6 +83,11 @@ DEFAULTS: dict = {
     "snapshots": {
         "max_backups": 50,
     },
+    "cache": {
+        # Спрашивать при старте интерактивного режима, очищать ли кэш
+        # (.agent-cache: снапшоты, логи, история ввода).
+        "ask_on_start": True,
+    },
     "agent": {
         # Максимум шагов модели (запросов к API) на одну задачу.
         # Защита от зацикливания, когда модель повторяет один и тот же вызов.
@@ -210,7 +215,7 @@ def setup(cli_project_root: str | None = None) -> Path:
     Вызывается автоматически при импорте и повторно из agent.main() (когда
     передан флаг -p или нужен свежий расчёт после смены cwd).
     """
-    global SETTINGS, API, PATHS, SNAPSHOTS, AGENT_CFG, TOOLS_CFG, WEB
+    global SETTINGS, API, PATHS, SNAPSHOTS, CACHE, AGENT_CFG, TOOLS_CFG, WEB
     global PROJECT_ROOT, LOADED_CONFIGS
     global API_KEY, BASE_URL, MODEL, TEMPERATURE, CONTEXT_LIMIT, MAX_BACKUPS
     global MAX_STEPS, API_RETRIES, SHELL_TIMEOUT
@@ -250,6 +255,7 @@ def setup(cli_project_root: str | None = None) -> Path:
     API = merged.get("api", {})
     PATHS = merged.get("paths", {})
     SNAPSHOTS = merged.get("snapshots", {})
+    CACHE = merged.get("cache", {})
     AGENT_CFG = merged.get("agent", {})
     TOOLS_CFG = merged.get("tools", {})
     WEB = deep_merge(DEFAULTS["tools"]["web"], TOOLS_CFG.get("web") or {})
@@ -295,6 +301,7 @@ SETTINGS: dict = {}
 API: dict = {}
 PATHS: dict = {}
 SNAPSHOTS: dict = {}
+CACHE: dict = {}
 AGENT_CFG: dict = {}
 TOOLS_CFG: dict = {}
 WEB: dict = {}
@@ -401,6 +408,11 @@ def backup_dir(project_root: str | os.PathLike | None = None) -> Path:
 
 def max_backups() -> int:
     return MAX_BACKUPS
+
+
+def ask_cache_on_start() -> bool:
+    """Спрашивать ли при старте, очищать ли кэш проекта."""
+    return bool(CACHE.get("ask_on_start", DEFAULTS["cache"]["ask_on_start"]))
 
 
 def max_steps() -> int:
