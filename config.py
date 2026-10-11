@@ -90,10 +90,61 @@ DEFAULTS: dict = {
     },
     "agent": {
         # Максимум шагов модели (запросов к API) на одну задачу.
-        # Защита от зацикливания, когда модель повторяет один и тот же вызов.
-        "max_steps": 25,
+        # 0 или меньше = без ограничений (по умолчанию): задачу не обрывает,
+        # а от зацикливания защищает agent.loop_guard (см. ниже).
+        "max_steps": 0,
         # Сколько раз повторять запрос к API при сетевой ошибке/429.
         "api_retries": 3,
+        # Язык ответов агента (подставляется в системный промпт).
+        "language": "русском",
+        # Профиль (роль) агента: имя из секции "profiles" (php, python, frontend, ...).
+        # Пусто = авто: навыки выбираются по стеку проекта. Переключается флагом
+        # --profile или командой :profile.
+        "profile": "",
+        # Защита от зацикливания: одинаковый вызов инструмента с тем же
+        # результатом подряд. Работает и при max_steps = 0.
+        "loop_guard": {
+            "enabled": True,
+            # Сколько одинаковых вызовов подряд считать циклом (0 = выключить).
+            "repeat_limit": 3,
+        },
+        # Дополнительные инструкции агента: строка или список строк.
+        # Так проект задаёт свои правила, не трогая код агента.
+        "instructions": [],
+    },
+    # Профили (роли) агента: какой набор навыков подключать и что дополнительно
+    # сказать модели. Выбор: agent.profile, флаг --profile, команда :profile.
+    # Свои профили (любой язык/фреймворк) добавляются в agent.config.json —
+    # код агента менять не нужно.
+    "profiles": {
+        "php": {
+            "description": "PHP-разработчик (веб-приложения)",
+            "skills": ["code-quality", "php-conventions", "php-web"],
+            "instructions": [],
+        },
+        "python": {
+            "description": "Python-разработчик",
+            "skills": ["code-quality", "python-conventions"],
+            "instructions": [],
+        },
+        "frontend": {
+            "description": "Фронтенд-разработчик (HTML/CSS/JS/TS)",
+            "skills": ["code-quality", "web-frontend"],
+            "instructions": [],
+        },
+    },
+    # Автолинтер: проверка синтаксиса файла сразу после write_file/edit_file.
+    # {file} — плейсхолдер пути к проверяемому файлу (в кавычках).
+    "lint": {
+        "enabled": True,
+        "timeout": 30,
+        "rules": [
+            {"ext": [".php", ".phtml"], "command": "php -l {file}", "label": "php -l"},
+            {"ext": [".js", ".mjs", ".cjs"], "command": "node --check {file}",
+             "label": "node --check"},
+            {"ext": [".py"], "command": "python -m py_compile {file}",
+             "label": "python -m py_compile"},
+        ],
     },
     "tools": {
         # Таймаут shell-команд, секунды.
@@ -215,7 +266,8 @@ def setup(cli_project_root: str | None = None) -> Path:
     Вызывается автоматически при импорте и повторно из agent.main() (когда
     передан флаг -p или нужен свежий расчёт после смены cwd).
     """
-    global SETTINGS, API, PATHS, SNAPSHOTS, CACHE, AGENT_CFG, TOOLS_CFG, WEB
+    global SETTINGS, API, PATHS, SNAPSHOTS, CACHE, AGENT_CFG, TOOLS_CFG, WEB, LINT
+    global PROFILES, LOOP_GUARD
     global PROJECT_ROOT, LOADED_CONFIGS
     global API_KEY, BASE_URL, MODEL, TEMPERATURE, CONTEXT_LIMIT, MAX_BACKUPS
     global MAX_STEPS, API_RETRIES, SHELL_TIMEOUT
@@ -259,6 +311,11 @@ def setup(cli_project_root: str | None = None) -> Path:
     AGENT_CFG = merged.get("agent", {})
     TOOLS_CFG = merged.get("tools", {})
     WEB = deep_merge(DEFAULTS["tools"]["web"], TOOLS_CFG.get("web") or {})
+    # Автолинтер: секция "lint" верхнего уровня или tools.lint (оба варианта).
+    LINT = deep_merge(
+        DEFAULTS["lint"],
+        merged.get("lint") or TOOLS_CFG.get("lint") or {},
+    )
     PROJECT_ROOT = root
     LOADED_CONFIGS = loaded
 
@@ -272,7 +329,14 @@ def setup(cli_project_root: str | None = None) -> Path:
     TEMPERATURE = float(API.get("temperature", DEFAULTS["api"]["temperature"]))
     CONTEXT_LIMIT = int(API.get("context_limit") or 0)
     MAX_BACKUPS = int(SNAPSHOTS.get("max_backups") or DEFAULTS["snapshots"]["max_backups"])
-    MAX_STEPS = int(AGENT_CFG.get("max_steps") or DEFAULTS["agent"]["max_steps"])
+    raw_steps = AGENT_CFG.get("max_steps")
+    MAX_STEPS = int(
+        DEFAULTS["agent"]["max_steps"] if raw_steps is None else raw_steps
+    )
+    LOOP_GUARD = deep_merge(
+        DEFAULTS["agent"]["loop_guard"], AGENT_CFG.get("loop_guard") or {}
+    )
+    PROFILES = merged.get("profiles") or DEFAULTS["profiles"]
     API_RETRIES = int(AGENT_CFG.get("api_retries") or DEFAULTS["agent"]["api_retries"])
     SHELL_TIMEOUT = int(TOOLS_CFG.get("shell_timeout") or DEFAULTS["tools"]["shell_timeout"])
     return root
@@ -305,6 +369,11 @@ CACHE: dict = {}
 AGENT_CFG: dict = {}
 TOOLS_CFG: dict = {}
 WEB: dict = {}
+LINT: dict = {}
+PROFILES: dict = {}
+LOOP_GUARD: dict = {}
+# Переопределение профиля на время сессии (флаг --profile / команда :profile).
+_PROFILE_OVERRIDE: str | None = None
 PROJECT_ROOT: Path = Path.cwd()
 API_KEY: str = ""
 BASE_URL: str = ""
@@ -312,7 +381,7 @@ MODEL: str = ""
 TEMPERATURE: float = 0.2
 CONTEXT_LIMIT: int = 0
 MAX_BACKUPS: int = 50
-MAX_STEPS: int = 25
+MAX_STEPS: int = 0
 API_RETRIES: int = 3
 SHELL_TIMEOUT: int = 60
 
@@ -416,8 +485,76 @@ def ask_cache_on_start() -> bool:
 
 
 def max_steps() -> int:
-    """Максимум шагов модели на одну задачу (защита от зацикливания)."""
+    """Максимум шагов модели на одну задачу.
+
+    0 или меньше означает «без ограничений» (проверяется в agent._run_loop);
+    от зацикливания в этом режиме защищает loop_guard_settings().
+    """
     return MAX_STEPS
+
+
+def loop_guard_settings() -> dict:
+    """Настройки защиты от зацикливания (секция agent.loop_guard)."""
+    return LOOP_GUARD
+
+
+def profiles() -> dict:
+    """Доступные профили (роли) агента: {имя: {description, skills, instructions}}.
+
+    Встроенные профили заданы в DEFAULTS, свои добавляются секцией "profiles"
+    в agent.config.json (ключи, начинающиеся с "_", — служебные пояснения).
+    """
+    return {
+        name: cfg for name, cfg in (PROFILES or {}).items()
+        if not name.startswith("_") and isinstance(cfg, dict)
+    }
+
+
+def profile_names() -> list[str]:
+    """Имена доступных профилей (для справки и валидации)."""
+    return sorted(profiles())
+
+
+def agent_profile() -> str:
+    """Имя активного профиля: переопределение сессии > конфиг > "" (авто)."""
+    if _PROFILE_OVERRIDE is not None:
+        return _PROFILE_OVERRIDE
+    return str(AGENT_CFG.get("profile") or "").strip().lower()
+
+
+def set_profile(name: str | None) -> str:
+    """Переключает профиль на время сессии (флаг --profile, команда :profile).
+
+    None — снять переопределение (вернуться к значению из конфига);
+    "", "auto", "none", "off" — авто по стеку проекта.
+    """
+    global _PROFILE_OVERRIDE
+    if name is None:
+        _PROFILE_OVERRIDE = None
+    else:
+        value = str(name).strip().lower()
+        _PROFILE_OVERRIDE = "" if value in ("", "auto", "none", "off") else value
+    return agent_profile()
+
+
+def active_profile() -> dict:
+    """Разобранный активный профиль или {} (авто / неизвестное имя).
+
+    Возвращает {"name", "description", "skills", "instructions"}.
+    """
+    name = agent_profile()
+    if not name:
+        return {}
+    cfg = profiles().get(name)
+    if not cfg:
+        return {}
+    skills = _as_list(cfg.get("skills"))
+    return {
+        "name": name,
+        "description": str(cfg.get("description") or name),
+        "skills": skills,
+        "instructions": _as_list(cfg.get("instructions")),
+    }
 
 
 def api_retries() -> int:
@@ -428,6 +565,31 @@ def api_retries() -> int:
 def shell_timeout() -> int:
     """Таймаут shell-команд в секундах."""
     return SHELL_TIMEOUT
+
+
+def lint_settings() -> dict:
+    """Настройки автолинтера (секция "lint" в agent.config.json)."""
+    return LINT
+
+
+def agent_language() -> str:
+    """Язык ответов агента (подставляется в системный промпт)."""
+    return str(AGENT_CFG.get("language") or DEFAULTS["agent"]["language"])
+
+
+def agent_instructions() -> str:
+    """Дополнительные инструкции проекта: строка или список строк.
+
+    Позволяют задать правила «под проект», не трогая код агента.
+    """
+    raw = AGENT_CFG.get("instructions")
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, list):
+        return "\n".join(
+            f"- {str(item).strip()}" for item in raw if str(item).strip()
+        )
+    return ""
 
 
 def web_settings() -> dict:
@@ -462,6 +624,27 @@ def variables(project_root: str | os.PathLike | None = None) -> dict:
     }
 
 
+def _loop_guard_summary() -> str:
+    """Строка про защиту от зацикливания для сводки настроек."""
+    limit = int(LOOP_GUARD.get("repeat_limit") or 0)
+    if not LOOP_GUARD.get("enabled", True) or limit <= 0:
+        return "выкл"
+    return f"вкл (стоп после {limit} одинаковых вызовов подряд)"
+
+
+def _profile_summary() -> str:
+    """Строка про активный профиль для сводки настроек."""
+    name = agent_profile()
+    if not name:
+        return "авто (навыки по стеку проекта)"
+    profile = active_profile()
+    if not profile:
+        return (f"{name} — НЕ НАЙДЕН в секции profiles "
+                f"(доступны: {', '.join(profile_names()) or 'нет'})")
+    return (f"{name} — {profile['description']} "
+            f"(навыки: {', '.join(profile['skills']) or '—'})")
+
+
 def settings_summary() -> str:
     """Короткая сводка конфигурации для :config / :doctor."""
     loaded = ", ".join(str(p) for p in LOADED_CONFIGS) or "нет (только DEFAULTS)"
@@ -479,8 +662,14 @@ def settings_summary() -> str:
         f"skills_dir:    {', '.join(str(p) for p in skills_candidates()) or 'нет'}",
         f"mcp_config:    {', '.join(str(p) for p in mcp)}",
         f"backup_dir:    {backup_dir()} (max {MAX_BACKUPS})",
-        f"max_steps:     {MAX_STEPS}   (повторов API при сбое: {API_RETRIES})",
+        f"max_steps:     {'без ограничений' if MAX_STEPS <= 0 else MAX_STEPS}   "
+        f"(повторов API при сбое: {API_RETRIES})",
+        f"loop-guard:    {_loop_guard_summary()}",
         f"shell_timeout: {SHELL_TIMEOUT} c",
+        f"language:      {agent_language()}",
+        f"profile:       {_profile_summary()}",
+        f"lint:          {'вкл' if LINT.get('enabled', True) else 'выкл'} "
+        f"({len(LINT.get('rules') or [])} правил, таймаут {LINT.get('timeout')} c)",
         f"web:           {'вкл' if WEB.get('enabled', True) else 'выкл'} "
         f"(timeout {WEB.get('timeout')} c, лимит {WEB.get('max_chars')} симв.)",
     ]

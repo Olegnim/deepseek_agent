@@ -27,8 +27,29 @@
     "ask_on_start": true
   },
   "agent": {
-    "max_steps": 25,
-    "api_retries": 3
+    "max_steps": 0,
+    "_max_steps_help": "0 = без ограничений: задача не обрывается на середине. От зацикливания защищает loop_guard ниже.",
+    "api_retries": 3,
+    "language": "русском",
+    "_profile_help": "Профиль (роль) агента: ключ из секции profiles или \"\" — авто по стеку проекта. Переключается флагом --profile или командой :profile.",
+    "profile": "",
+    "loop_guard": {
+      "enabled": true,
+      "repeat_limit": 3
+    },
+    "instructions": []
+  },
+  "profiles": {
+    "_readme": "Профили (роли) агента: имя -> {description, skills, instructions}. skills — имена папок в skills/. Встроенные: php, python, frontend (см. config.py). Свой язык добавляется здесь, код агента менять не нужно. Пример: \"go\": { \"description\": \"Go-разработчик\", \"skills\": [\"code-quality\", \"go-conventions\"] }."
+  },
+  "lint": {
+    "enabled": true,
+    "timeout": 30,
+    "rules": [
+      { "ext": [".php", ".phtml"], "command": "php -l {file}", "label": "php -l" },
+      { "ext": [".js", ".mjs", ".cjs"], "command": "node --check {file}", "label": "node --check" },
+      { "ext": [".py"], "command": "python -m py_compile {file}", "label": "python -m py_compile" }
+    ]
   },
   "tools": {
     "shell_timeout": 60,

@@ -1,14 +1,24 @@
 """
-DeepSeek CLI Agent для написания PHP/Python кода.
+DeepSeek CLI Agent — универсальный помощник по коду (PHP, Python, JS/TS, веб).
 
 Возможности:
 - работа с конкретным проектом (--project-root);
+- автоопределение стека проекта (composer.json, package.json, pyproject.toml, ...);
+- профили (роли) агента: --profile php / python / frontend или свои из секции
+  "profiles" в конфиге (привязывают агента к нужному набору навыков);
+- правила под проект через навыки (skills) и agent.instructions в конфиге;
+- автолинтер: проверка синтаксиса файла сразу после write_file/edit_file;
+- шаги без лимита (agent.max_steps = 0) + loop-guard: защита от зацикливания
+  на повторяющемся действии;
 - подтверждение опасных операций;
 - автоснапшоты файлов перед правкой (.agent-cache/backups/);
-- навыки (skills) из корня проекта или рядом с агентом;
 - MCP-серверы через mcp_config.json;
 - интерактивный REPL с командами (:help, :tokens, :context, :restore, ...);
 - спиннер, цветной вывод, статистика токенов и размера контекста.
+
+Никаких зашитых под конкретный язык правил здесь нет: язык, стек и проверки
+описываются в скиллах (skills/*/SKILL.md), профилях, секции "lint" и
+agent.instructions файла agent.config.json.
 """
 
 import re
@@ -17,6 +27,7 @@ import sys
 import json
 import time
 import shutil
+import platform
 import argparse
 import asyncio
 from datetime import datetime
@@ -76,11 +87,16 @@ from config import (
     api_retries as config_api_retries,
     web_settings as config_web_settings,
     ask_cache_on_start as config_ask_cache_on_start,
+    agent_language as config_agent_language,
+    agent_instructions as config_agent_instructions,
+    lint_settings as config_lint_settings,
 )
 from tools import TOOLS, REGISTRY, WEB_TOOLS, GIT_TOOLS, PATH_TOOLS
+from tools import linter, loop_guard
 from tools.filesystem import project_outline
+from tools.stack import stack_summary, detect_tags
 from tools.cache import cache_overview, clear_cache, format_overview, human_size
-from skills_loader import load_skill_map
+from skills_loader import load_skill_map, load_skills_for_stack
 from mcp_integration import MCPManager, load_mcp_servers
 
 # --- Snapshot (автоснапшоты перед правкой) ---
@@ -250,29 +266,84 @@ def make_snapshot(tool_name: str, args: dict) -> None:
         ui_info(f"snapshot пропущен ({type(e).__name__}): {e}")
 
 
+def _as_text_list(value) -> list[str]:
+    """Строка/список → список непустых строк (для профилей и инструкций)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return [str(v) for v in value if str(v).strip()]
+
+
 def load_project_skills() -> str:
     """Навыки проекта + навыки самого агента, объединённые по имени.
 
     Папки берутся из config.skills_candidates: сначала проект, затем AGENT_HOME.
     При совпадении имени навыка выигрывает проектный.
+
+    Два режима:
+      * профиль (agent.profile / --profile / :profile) — грузятся только
+        перечисленные в нём навыки: агент работает «как PHP-разработчик»
+        или «как Python-разработчик» независимо от содержимого проекта;
+      * авто (профиль не задан) — навыки с полем `applies_to` подключаются,
+        только если их тема совпадает со стеком проекта (composer.json,
+        package.json, ...). Так в проект на Python не попадут правила по PHP.
     """
+    profile = app_config.active_profile()
+
+    tags: set[str] = set()
+    only: set[str] | None = None
+    if profile:
+        only = set(profile.get("skills") or [])
+    else:
+        try:
+            tags = detect_tags(PROJECT_ROOT)
+        except Exception:
+            tags = set()
+
     merged: dict[str, str] = {}
     for path in skills_candidates(PROJECT_ROOT):
-        for name, content in load_skill_map(str(path)).items():
+        for name, content in load_skills_for_stack(str(path), tags, only=only).items():
             merged.setdefault(name, content)
     return "\n\n".join(
         f"### Skill: {name}\n{content}" for name, content in merged.items()
     )
 
 
+def _tool_examples() -> str:
+    """Примеры команд проверки — генерируются из правил автолинта.
+
+    Никаких зашитых «php -l» в тексте промпта: если в проекте проверяется,
+    скажем, только Python, PHP-пример и не появится.
+    """
+    lines: list[str] = []
+    for rule in config_lint_settings().get("rules") or []:
+        command = str(rule.get("command") or "").strip()
+        if not command:
+            continue
+        ext = command.replace(" {file}", "")
+        lines.append(f'  run_shell("{ext} путь/к/файлу")')
+    return "\n".join(lines) if lines else "  (правила автолинта не заданы)"
+
+
 def build_system_prompt() -> str:
-    """Собирает системный промпт с навыками и структурой проекта."""
+    """Собирает системный промпт.
+
+    Промпт нейтрален к языку и ОС: стек проекта определяется автоматически,
+    а предметные правила живут в навыках (skills) и agent.instructions.
+    """
     skills = load_project_skills()
+    language = config_agent_language()
 
     try:
         tree = project_outline(PROJECT_ROOT, depth=2)
     except Exception:
         tree = "(не удалось получить структуру проекта)"
+
+    try:
+        stack = stack_summary(PROJECT_ROOT)
+    except Exception:
+        stack = "не определён"
 
     mcp_info = ""
     if mcp_manager and mcp_manager.get_tools():
@@ -294,10 +365,49 @@ def build_system_prompt() -> str:
             "для проверки версий, синтаксиса библиотек и сообщений об ошибках;"
         )
 
-    return f"""Ты CLI-агент для написания PHP и Python кода на Windows.
+    lint_info = ""
+    lint_hints = ""
+    if linter.lint_enabled():
+        rules = linter.describe_rules()
+        lint_info = (
+            "\nПосле каждой правки файла автолинт сам проверяет синтаксис — "
+            "учитывай его результат и исправь ошибку, если проверка не прошла."
+        )
+        if rules:
+            lint_hints = (
+                "\n\nНастроенные проверки (автолинт, запускаются автоматически):\n"
+                + "\n".join(rules)
+                + "\nТе же команды можно вызвать вручную, подставив путь:\n"
+                + _tool_examples()
+            )
+
+    extra = config_agent_instructions()
+    extra_block = f"\n\nДополнительные правила проекта:\n{extra}" if extra else ""
+
+    profile = app_config.active_profile()
+    profile_info = ""
+    profile_block = ""
+    if profile:
+        skills_list = ", ".join(profile["skills"]) or "—"
+        profile_info = (
+            f"\nПрофиль: {profile['description']} (навыки: {skills_list})."
+        )
+        profile_block = (
+            f"\n\nАктивный профиль: {profile['description']} ({profile['name']}).\n"
+            "Работай в рамках этого профиля: стек, стиль и проверки — его, даже "
+            "если в проекте есть файлы других языков."
+        )
+        if profile["instructions"]:
+            profile_block += "\n" + "\n".join(
+                f"- {line}" for line in profile["instructions"]
+            )
+
+    return f"""Ты CLI-агент для написания и правки кода.
 Ты работаешь с проектом в директории: {PROJECT_ROOT}
+Система: {platform.system()} {platform.release()}
 Настройки и все пути задаются в одном редактируемом файле: {CONFIG_PATH}
 (команда :config показывает текущие значения).
+Определённый стек проекта: {stack}{profile_info}
 
 Структура проекта (до 2 уровней; полный список — list_dir):
 {tree}
@@ -305,53 +415,44 @@ def build_system_prompt() -> str:
 Твои возможности:
 - читать, писать и точечно редактировать файлы;
 - искать по коду регулярными выражениями;
-- запускать shell-команды (php -l, node --check, python -m pytest);
+- запускать shell-команды (тесты, сборка, линтеры);
 - смотреть состояние репозитория: git_status, git_diff, git_log;{web_info}
 - использовать инструменты MCP-серверов, если они подключены;
-- следовать правилам навыков, описанных ниже.
-{mcp_info}{snapshot_info}
+- следовать правилам навыков (skills), описанных ниже.
+{mcp_info}{snapshot_info}{lint_info}
 
 Как решать типовые задачи:
 
-- Проверить синтаксис PHP после правки:
-  run_shell("php -l путь/к/файлу.php")
-
-- Проверить JS:
-  run_shell("node --check путь/к/файлу.js")
-
-- Найти все использования класса или функции:
-  grep("имя_класса", ".", ".php")     # третий аргумент — расширение
-
-- Прочитать середину большого файла (когда read_file обрезает):
-  read_range("путь", 400, 600)
-
-- Переименовать во всех местах файла:
+- Перед правкой файла всегда сначала прочитай его (read_file / read_range).
+- Небольшая правка существующего кода — edit_file; новый файл или полная
+  перезапись — write_file.
+- Переименовать/заменить во всех местах файла:
   edit_file(path=..., old_text=..., new_text=..., replace_all=true)
-
-- Понять, что уже изменено:
-  git_status(), затем git_diff() или git_diff(path="src/Foo.php")
+- Найти использования класса или функции:
+  grep("имя_функции", ".", ".php")   # третий аргумент — расширение файла
+- Большой файл целиком не читается (обрезается) — используй
+  read_range("путь", 400, 600).
+- Понять, что уже изменено: git_status(), затем git_diff(path="src/File.php"){lint_hints}
 
 Правила:
-- Отвечай кратко, на русском.
-- Перед правкой файла сначала прочитай его.
-- Для небольших правок используй `edit_file`, а не `write_file`.
-- После правки PHP-файла обязательно запусти `php -l`.
+- Отвечай кратко, на {language}.
+- Меняй только то, что нужно для задачи: минимальный диф, без массового
+  переформатирования чужих участков.
+- Не оставляй отладочный код (var_dump, print_r, console.log, print, dd) в правках.
 - Все пути — относительно корня проекта, без ведущего слэша.
-- Когда задача выполнена — дай короткое резюме изменений.
+- Когда задача выполнена — дай короткое резюме изменений.{extra_block}
 
 Правила для фоновых процессов:
 - НЕ запускай долгоживущие серверы (php -S, node server.js, python -m http.server)
   через run_shell — команда не завершится, и агент зависнет.
-- Если нужно проверить работу локального сервера:
-  1. Попроси пользователя запустить сервер в отдельном терминале.
-  2. Или запусти короткую проверку одной командой, которая сама завершается:
-     run_shell("php -l file.php")              — проверка синтаксиса
-     run_shell("curl -s http://127.0.0.1:8124")  — один запрос, ответ, выход
-- Для проверки, что сервер поднимается, используй:
-  run_shell("powershell -Command \"Test-NetConnection 127.0.0.1 -Port 8124\"")
+- Если нужно проверить работу локального сервера, попроси пользователя запустить
+  его в отдельном терминале, а сам делай короткую проверку одной командой,
+  которая завершается сама:
+  run_shell("curl -s http://127.0.0.1:8124")
+  run_shell('powershell -Command "Test-NetConnection 127.0.0.1 -Port 8124"')
 
 Навыки проекта:
-{skills or "(навыки не найдены)"}
+{skills or "(навыки не найдены)"}{profile_block}
 """
 
 
@@ -440,12 +541,18 @@ async def execute_tool(name: str, args: dict) -> str:
             return "Пользователь отклонил выполнение."
 
         try:
-            return str(REGISTRY[name](**args))
+            result = str(REGISTRY[name](**args))
         except Exception as e:
             return f"ERROR: {type(e).__name__}: {e}"
 
+        # Автолинт: после правки файла сразу проверяем синтаксис.
+        return linter.lint_result(name, args, result)
+
     # ---- MCP-инструменты ----
     if mcp_manager and mcp_manager.has_tool(name):
+        # Снапшоты работают и для MCP-правок (filesystem__write_file и т.п.).
+        if name in SNAPSHOT_TOOLS and args.get("path"):
+            make_snapshot(name, args)
         if name in DANGEROUS_TOOLS and not confirm(name, args):
             return "Пользователь отклонил выполнение."
         return await mcp_manager.call_tool(name, args)
@@ -582,16 +689,20 @@ def _is_retryable(error: Exception) -> bool:
 
 async def _run_loop(messages: list) -> None:
     all_tools = build_tools_list()
-    max_steps = max(1, config_max_steps())
+    # max_steps <= 0 => без ограничений (см. config.max_steps): от зацикливания
+    # защищает loop-guard, см. tools/loop_guard.py.
+    max_steps = config_max_steps()
+    guard = loop_guard.LoopGuard()
     step = 0
 
     while True:
         step += 1
-        if step > max_steps:
+        if max_steps > 0 and step > max_steps:
             ui_error(
-                f"Достигнут лимит шагов ({max_steps}) — останавливаюсь, "
-                "чтобы не зациклиться. Уточните задачу или увеличьте "
-                "agent.max_steps в agent.config.json."
+                f"Достигнут лимит шагов ({max_steps}) — останавливаюсь. "
+                "Уточните задачу или уберите лимит: agent.max_steps = 0 "
+                "в agent.config.json (0 = без ограничений, зацикливание ловит "
+                "agent.loop_guard)."
             )
             log_line("limit", f"max_steps={max_steps} reached")
             return
@@ -619,6 +730,7 @@ async def _run_loop(messages: list) -> None:
 
         messages.append(msg)
 
+        warned: list[str] = []
         for call in msg.tool_calls:
             name = call.function.name
             try:
@@ -645,6 +757,24 @@ async def _run_loop(messages: list) -> None:
                 "content": content,
             })
 
+            # Зацикливание: одинаковый вызов с тем же результатом подряд.
+            state = guard.observe(name, args, str(result))
+            if state == loop_guard.STOP:
+                print()
+                ui_error(guard.message(name, args))
+                log_line("loop-guard", f"stop: {loop_guard.describe_call(name, args)}")
+                print()
+                return
+            if state == loop_guard.WARN:
+                warned.append(guard.warning(name, args))
+                log_line("loop-guard", f"warn: {loop_guard.describe_call(name, args)}")
+
+        # Предупреждения добавляем после результатов инструментов, чтобы не
+        # разрывать пары assistant(tool_calls) → tool.
+        for text in warned:
+            messages.append({"role": "user", "content": text})
+            ui_info("Похоже на цикл: прошу модель сменить подход.")
+
 
 # ---------- Команды REPL ----------
 
@@ -655,6 +785,9 @@ def cmd_help() -> None:
   [cyan]:tokens[/cyan]            — статистика токенов за сессию
   [cyan]:context[/cyan]           — размер текущего контекста
   [cyan]:tools[/cyan]             — доступные инструменты (вкл. web и git)
+  [cyan]:lint [файл][/cyan]      — прогнать автолинт (php -l / node --check / ...)
+  [cyan]:profile [имя][/cyan]    — показать/сменить профиль (php, python, ...)
+  [cyan]:profiles[/cyan]         — список профилей (ролей) агента
   [cyan]:skills[/cyan]            — загруженные навыки
   [cyan]:mcp[/cyan]               — статус MCP-серверов
   [cyan]:snapshots[/cyan]         — список снапшотов
@@ -766,14 +899,110 @@ def cmd_tools() -> None:
             ui_print(f"  · {n}", style="magenta")
 
 
+def cmd_lint(arg: str = "") -> None:
+    """Ручной запуск автолинта для одного файла (:lint путь/к/файлу)."""
+    raw = (arg or "").strip()
+    if not raw:
+        ui_error("Использование: :lint путь/к/файлу")
+        rules = linter.describe_rules()
+        if rules:
+            ui_info("Настроенные проверки:")
+            for line in rules:
+                ui_print(f"  {line}", style="dim")
+        else:
+            ui_info("Правила автолинта не заданы (секция lint в agent.config.json).")
+        return
+
+    target = Path(raw) if Path(raw).is_absolute() else PROJECT_ROOT / raw
+    report = linter.lint_file(target)
+    if report is None:
+        ui_info("Для этого файла нет правила автолинта "
+                "(проверь расширение и секцию lint в agent.config.json).")
+        return
+    ui_print(report, style="green" if report.endswith("OK") else "yellow")
+
+
 def cmd_skills() -> None:
+    profile = app_config.active_profile()
+    if profile:
+        ui_info(f"Профиль: {profile['name']} — {profile['description']} "
+                f"(навыки: {', '.join(profile['skills']) or '—'})")
     skills = load_project_skills()
     if not skills:
         ui_info("Навыки не найдены.")
+        if profile:
+            ui_info("Проверьте имена навыков в профиле и папку skills/.")
         return
     for line in skills.splitlines():
         if line.startswith("### Skill:"):
             ui_print(f"· {line.replace('### Skill:', '').strip()}", style="cyan")
+
+
+def cmd_profiles() -> None:
+    """Список профилей (ролей) агента с описанием."""
+    all_profiles = app_config.profiles()
+    current = app_config.active_profile()
+    requested = app_config.agent_profile()
+    if not all_profiles:
+        ui_info("Профили не заданы (секция profiles в agent.config.json).")
+        return
+    ui_print("[bold]Профили:[/bold]")
+    for name in sorted(all_profiles):
+        cfg = all_profiles[name]
+        mark = "→" if current and current["name"] == name else " "
+        skills = ", ".join(_as_text_list(cfg.get("skills"))) or "—"
+        ui_print(f" {mark} [cyan]{name}[/cyan] — {cfg.get('description') or ''}")
+        ui_print(f"     навыки: {skills}", style="dim")
+    if requested and not current:
+        ui_error(f"Профиль «{requested}» не найден — работаю автоматически по стеку.")
+    ui_info("Переключение: :profile <имя>, :profile auto (авто по стеку), "
+            "флаг --profile <имя>.")
+
+
+def cmd_profile(arg: str = "") -> bool:
+    """Показать активный профиль или переключить его (:profile php).
+
+    Возвращает True, если профиль изменён (нужно пересобрать системный промпт).
+    """
+    name = (arg or "").strip()
+    if name.lower() in ("list", "all"):
+        cmd_profiles()
+        return False
+    if not name:
+        current = app_config.active_profile()
+        requested = app_config.agent_profile()
+        if current:
+            ui_info(f"Активный профиль: {current['name']} — {current['description']}")
+            ui_info(f"Навыки: {', '.join(current['skills']) or '—'}")
+        elif requested:
+            ui_error(f"Профиль «{requested}» не найден в секции profiles.")
+        else:
+            ui_info("Профиль не задан — навыки выбираются по стеку проекта.")
+        cmd_profiles()
+        return False
+
+    if name.lower() in ("auto", "none", "off", "-"):
+        app_config.set_profile("")
+        ui_info("Профиль сброшен: навыки снова выбираются по стеку проекта.")
+        return True
+
+    if name.lower() not in app_config.profiles():
+        ui_error(f"Неизвестный профиль: {name}")
+        cmd_profiles()
+        return False
+
+    app_config.set_profile(name.lower())
+    current = app_config.active_profile()
+    ui_info(f"Профиль: {current['name']} — {current['description']}")
+    ui_info(f"Навыки: {', '.join(current['skills']) or '—'}")
+    return True
+
+
+def _refresh_system_prompt(messages: list) -> None:
+    """Пересобирает системный промпт в истории диалога (после смены профиля)."""
+    if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
+        messages[0]["content"] = build_system_prompt()
+        ui_info("Системный промпт обновлён (профиль перечитан).")
 
 
 def cmd_mcp() -> None:
@@ -866,7 +1095,37 @@ def cmd_doctor() -> None:
     ui_print(f"[cyan]AGENT_HOME:[/cyan]   {agent_home()}")
     ui_print(f"[cyan]agent.py:[/cyan]     {Path(__file__).resolve()}")
     ui_print(f"[cyan]PROJECT_ROOT:[/cyan] {PROJECT_ROOT}")
-    ui_print(f"[cyan]cwd:[/cyan]          {Path.cwd()}\n")
+    ui_print(f"[cyan]cwd:[/cyan]          {Path.cwd()}")
+    try:
+        ui_print(f"[cyan]стек:[/cyan]         {stack_summary(PROJECT_ROOT)}")
+    except Exception:
+        pass
+    print()
+
+    ui_print("[bold]Автолинт[/bold]")
+    if linter.lint_enabled():
+        for line in linter.describe_rules() or ["  (правил нет)"]:
+            ui_print(f"  {line}", style="dim")
+    else:
+        ui_print("  ~ выключен (секция lint в agent.config.json)", style="yellow")
+    print()
+
+    ui_print("[bold]Профиль (роль)[/bold]")
+    profile = app_config.active_profile()
+    requested = app_config.agent_profile()
+    if profile:
+        ui_print(f"  ✓ {profile['name']} — {profile['description']}")
+        ui_print(f"      навыки: {', '.join(profile['skills']) or '—'}", style="dim")
+    elif requested:
+        ui_print(f"  ✗ профиль «{requested}» не найден — работаю авто по стеку",
+                 style="yellow")
+    else:
+        ui_print("  ~ не задан — навыки выбираются автоматически по стеку проекта",
+                 style="dim")
+    all_profiles = sorted(app_config.profiles())
+    if all_profiles:
+        ui_print(f"      доступны: {', '.join(all_profiles)}", style="dim")
+    print()
 
     ui_print("[bold]Конфиги[/bold]")
     if app_config.LOADED_CONFIGS:
@@ -1008,8 +1267,19 @@ async def handle_command(cmd: str, messages: list) -> bool:
         cmd_context()
     elif c == ":tools":
         cmd_tools()
+    elif c == ":lint":
+        cmd_lint()
+    elif c.startswith(":lint "):
+        cmd_lint(c.split(None, 1)[1])
     elif c == ":skills":
         cmd_skills()
+    elif c == ":profile":
+        cmd_profile()
+    elif c.startswith(":profile "):
+        if cmd_profile(c.split(None, 1)[1]):
+            _refresh_system_prompt(messages)
+    elif c == ":profiles":
+        cmd_profiles()
     elif c == ":mcp":
         cmd_mcp()
     elif c == ":snapshots":
@@ -1109,10 +1379,17 @@ async def repl(system_prompt: str) -> None:
 async def main_async(args) -> None:
     global PROJECT_ROOT, CONFIRM_MODE, mcp_manager, ASK_CACHE_ON_START
 
+    if args.list_profiles:
+        PROJECT_ROOT = config_setup(args.project_root)
+        cmd_profiles()
+        return
+
     # Диагностика работает без API-ключа: удобно проверить установку сразу
     # после клонирования, до настройки ключа.
     if args.doctor:
         PROJECT_ROOT = config_setup(args.project_root)
+        if args.profile:
+            app_config.set_profile(args.profile)
         _open_session_log()
         if args.clear_cache:
             ui_print(clear_cache(PROJECT_ROOT), style="green")
@@ -1130,6 +1407,14 @@ async def main_async(args) -> None:
     if not PROJECT_ROOT.is_dir():
         ui_error(f"Папка не найдена: {PROJECT_ROOT}")
         sys.exit(1)
+
+    # Профиль из командной строки перекрывает agent.profile на время сессии.
+    if args.profile:
+        app_config.set_profile(args.profile)
+        if not app_config.active_profile():
+            ui_error(f"Неизвестный профиль: {args.profile} "
+                     f"(доступны: {', '.join(app_config.profile_names()) or 'нет'})")
+            sys.exit(1)
 
     if HAS_SNAPSHOT:
         snapshot.set_project_root(PROJECT_ROOT)
@@ -1150,6 +1435,21 @@ async def main_async(args) -> None:
     ui_print(f"                ·  модель: [cyan]{MODEL}[/cyan]  "
              f"·  подтверждения: [cyan]{'выкл' if not CONFIRM_MODE else 'вкл'}[/cyan]")
     ui_info(f"агент: {agent_home()}")
+    try:
+        ui_info(f"стек проекта: {stack_summary(PROJECT_ROOT)}  ·  "
+                f"автолинт: {'вкл' if linter.lint_enabled() else 'выкл'}")
+    except Exception:
+        pass
+    profile = app_config.active_profile()
+    if profile:
+        ui_info(f"профиль: {profile['name']} — {profile['description']}")
+    else:
+        requested = app_config.agent_profile()
+        if requested:
+            ui_info(f"профиль «{requested}» не найден — работаю авто по стеку")
+        else:
+            ui_info("профиль: авто (навыки по стеку проекта) "
+                    "· сменить: --profile <имя> или :profile <имя>")
     for conf in app_config.LOADED_CONFIGS:
         ui_info(f"конфиг: {conf}")
     if HAS_SNAPSHOT:
@@ -1202,11 +1502,16 @@ async def main_async(args) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="DeepSeek CLI Agent — помощник по PHP/Python коду."
+        description="DeepSeek CLI Agent — помощник по коду в вашем проекте."
     )
     parser.add_argument("-p", "--project-root", default=None,
                         help="Корень проекта. По умолчанию — папка запуска (cwd), "
                              "если не задан в agent.config.json.")
+    parser.add_argument("--profile", default=None, metavar="ИМЯ",
+                        help="Профиль (роль) агента: php, python, frontend или "
+                             "свой из секции profiles. Внутри сессии — :profile.")
+    parser.add_argument("--list-profiles", action="store_true",
+                        help="Показать доступные профили и выйти (API-ключ не нужен).")
     parser.add_argument("-t", "--task",
                         help="Разовая задача. Без неё — интерактивный REPL.")
     parser.add_argument("--no-confirm", action="store_true",
