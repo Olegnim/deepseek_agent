@@ -174,7 +174,25 @@ def _ask(prompt: str) -> str:
 
 # ---------- Глобальные переменные ----------
 
-client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+# Клиент создаётся лениво (в _get_client): на момент импорта модуля ключ может
+# быть ещё не задан, а падать нужно понятным сообщением, а не traceback'ом
+# из openai.OpenAI().
+client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
+    """Возвращает клиента OpenAI, создавая его при первом обращении."""
+    global client
+    if client is None:
+        if not app_config.API_KEY:
+            env_name = app_config.API.get("api_key_env") or "DEEPSEEK_API_KEY"
+            ui_error(f"API-ключ не задан: установите {env_name} "
+                     f"или api.api_key в .agent.config.json.")
+            sys.exit(1)
+        client = OpenAI(api_key=app_config.API_KEY,
+                        base_url=app_config.BASE_URL or BASE_URL)
+    return client
+
 
 # Корень проекта = папка запуска (cwd), если не переопределён в agent.config.json
 # или флагом -p. Финализируется в main_async() через config.setup().
@@ -653,13 +671,13 @@ def _api_request(messages: list, all_tools: list):
     if console:
         spinner = Spinner("dots", text=Text(" DeepSeek думает...", style="dim"))
         with Live(spinner, console=console, refresh_per_second=10, transient=True):
-            return client.chat.completions.create(
+            return _get_client().chat.completions.create(
                 model=MODEL, messages=messages, tools=all_tools,
                 tool_choice="auto", temperature=TEMPERATURE,
             )
     print("... DeepSeek думает", end="", flush=True)
     try:
-        return client.chat.completions.create(
+        return _get_client().chat.completions.create(
             model=MODEL, messages=messages, tools=all_tools,
             tool_choice="auto", temperature=TEMPERATURE,
         )
@@ -1255,8 +1273,12 @@ def cmd_doctor() -> None:
     ui_print("[bold]API-ключ[/bold]")
     env_name = app_config.API.get("api_key_env") or "DEEPSEEK_API_KEY"
     if API_KEY:
-        source = "из переменной окружения" if os.environ.get(env_name) \
-            else "из .agent.config.json"
+        if os.environ.get(env_name):
+            source = "из переменной окружения"
+        elif app_config.env_value(env_name):
+            source = "из реестра Windows (переменная окружения)"
+        else:
+            source = "из .agent.config.json"
         ui_print(f"  [green]✓[/green] задан ({source}, {env_name})")
     else:
         ui_print("  [red]✗ не найден[/red] — задайте DEEPSEEK_API_KEY "
@@ -1416,12 +1438,23 @@ async def main_async(args) -> None:
         cmd_doctor()
         return
 
-    if not API_KEY:
-        ui_error("Переменная окружения DEEPSEEK_API_KEY не установлена.")
+    # Определяем корень проекта и перечитываем конфиги: -p > DEEPSEEK_PROJECT_ROOT
+    # > конфиг в проекте > agent.config.json > cwd (папка запуска).
+    PROJECT_ROOT = config_setup(args.project_root)
+    if not PROJECT_ROOT.is_dir():
+        ui_error(f"Папка не найдена: {PROJECT_ROOT}")
+        sys.exit(1)
+
+    # Ключ проверяем после config_setup(): проектный .agent.config.json тоже
+    # может его задавать. Значение читаем из config, а не из импортированной копии.
+    if not app_config.API_KEY:
         env_name = app_config.API.get("api_key_env") or "DEEPSEEK_API_KEY"
+        ui_error(f"API-ключ не найден (ни ${env_name}, ни api.api_key в конфиге).")
         if os.name == "nt":
             print(f'  Windows (cmd):        setx {env_name} "sk-..."')
             print(f'  Windows (PowerShell): $env:{env_name} = "sk-..."')
+            print('  После setx переменная видна только НОВЫМ терминалам; '
+                  'агент дополнительно читает её из реестра Windows.')
         else:
             print(f'  Linux/macOS:          export {env_name}="sk-..."')
             print(f'                        (постоянно: добавьте строку '
@@ -1429,12 +1462,7 @@ async def main_async(args) -> None:
         print(f'  Либо укажите ключ в api.api_key файла .agent.config.json.')
         sys.exit(1)
 
-    # Определяем корень проекта и перечитываем конфиги: -p > DEEPSEEK_PROJECT_ROOT
-    # > конфиг в проекте > agent.config.json > cwd (папка запуска).
-    PROJECT_ROOT = config_setup(args.project_root)
-    if not PROJECT_ROOT.is_dir():
-        ui_error(f"Папка не найдена: {PROJECT_ROOT}")
-        sys.exit(1)
+    _get_client()  # создаём клиента сразу, чтобы ошибки в конфиге были видны на старте
 
     # Профиль из командной строки перекрывает agent.profile на время сессии.
     if args.profile:

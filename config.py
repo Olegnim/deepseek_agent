@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -189,6 +190,44 @@ def deep_merge(base: dict, extra: dict) -> dict:
     return result
 
 
+# Ветки реестра Windows, где лежат «постоянные» переменные окружения.
+_WIN_ENV_LOCATIONS = (
+    ("HKEY_CURRENT_USER", r"Environment"),
+    ("HKEY_LOCAL_MACHINE",
+     r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+)
+
+
+def env_value(name: str, default: str = "") -> str:
+    """Значение переменной окружения с запасным чтением из реестра Windows.
+
+    `setx` (и «Параметры системы → Переменные среды») пишут переменную в реестр,
+    но уже запущенные процессы — терминал, VS Code, python — её не видят до
+    перезапуска. Поэтому если в os.environ значения нет, на Windows читаем
+    ветки HKCU\\Environment и системную. Так ключ подхватывается сразу.
+    """
+    value = os.environ.get(name)
+    if value:
+        return value
+    if os.name != "nt":
+        return default
+    try:
+        import winreg
+    except ImportError:  # pragma: no cover - Windows без winreg не бывает
+        return default
+    for hive_name, subkey in _WIN_ENV_LOCATIONS:
+        try:
+            with winreg.OpenKey(getattr(winreg, hive_name), subkey) as key:
+                raw, _ = winreg.QueryValueEx(key, name)
+        except OSError:
+            continue
+        if raw:
+            text = os.path.expandvars(str(raw))  # REG_EXPAND_SZ: %SystemRoot% и т.п.
+            logging.debug("%s: значение взято из реестра Windows", name)
+            return text
+    return default
+
+
 def expand_vars(value, variables: dict) -> object:
     """Раскрывает ${env:VAR}, ${agent_home}, ${project_root} в строках/списках/dict."""
     variables = variables or {}
@@ -196,7 +235,7 @@ def expand_vars(value, variables: dict) -> object:
         def repl(match: re.Match) -> str:
             key = match.group(1).strip()
             if key.startswith("env:"):
-                return os.environ.get(key[4:].strip(), "")
+                return env_value(key[4:].strip())
             if key == "agent_dir":
                 key = "agent_home"
             return str(variables.get(key, ""))
@@ -240,6 +279,38 @@ def _as_list(value) -> list[str]:
     return [str(v) for v in value if str(v).strip()]
 
 
+_TOKEN_SUFFIXES = {"k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
+
+
+def parse_token_count(value) -> int:
+    """Токены из конфига: число или строка с суффиксом (65536, "128k", "1M").
+
+    Некорректное значение даёт 0 — «лимит неизвестен», агент продолжит работу.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().replace("_", "").replace(" ", "")
+    if not text:
+        return 0
+    suffix = text[-1].lower()
+    if suffix in _TOKEN_SUFFIXES:
+        text, multiplier = text[:-1], _TOKEN_SUFFIXES[suffix]
+    else:
+        multiplier = 1
+    try:
+        return int(float(text) * multiplier)
+    except ValueError:
+        logging.warning("context_limit: не удалось разобрать %r", value)
+        return 0
+
+
+def fmt_tokens(count: int) -> str:
+    """Число токенов с разделителями разрядов: 1000000 -> '1 000 000'."""
+    return f"{int(count):,}".replace(",", " ")
+
+
 # ---------- Определение корня проекта ----------
 
 def resolve_project_root(cli_root: str | None = None) -> Path:
@@ -250,7 +321,7 @@ def resolve_project_root(cli_root: str | None = None) -> Path:
     if cli_root:
         return _normalize_path(cli_root, Path.cwd())
 
-    env_root = (os.environ.get("DEEPSEEK_PROJECT_ROOT") or "").strip()
+    env_root = (env_value("DEEPSEEK_PROJECT_ROOT") or "").strip()
     if env_root:
         return _normalize_path(env_root, Path.cwd())
 
@@ -331,14 +402,16 @@ def setup(cli_project_root: str | None = None) -> Path:
     LOADED_CONFIGS = loaded
 
     API_KEY = (
-        os.environ.get(API.get("api_key_env") or "DEEPSEEK_API_KEY")
+        env_value(API.get("api_key_env") or "DEEPSEEK_API_KEY")
         or API.get("api_key")
         or ""
     )
+    # Пустая строка -> "" (для :doctor и подсказок видно, что ключа нет).
+    API_KEY = API_KEY.strip()
     BASE_URL = API.get("base_url") or DEFAULTS["api"]["base_url"]
     MODEL = API.get("model") or DEFAULTS["api"]["model"]
     TEMPERATURE = float(API.get("temperature", DEFAULTS["api"]["temperature"]))
-    CONTEXT_LIMIT = int(API.get("context_limit") or 0)
+    CONTEXT_LIMIT = parse_token_count(API.get("context_limit"))
     MAX_BACKUPS = int(SNAPSHOTS.get("max_backups") or DEFAULTS["snapshots"]["max_backups"])
     raw_steps = AGENT_CFG.get("max_steps")
     MAX_STEPS = int(
@@ -667,7 +740,7 @@ def settings_summary() -> str:
         f"model:         {MODEL}",
         f"base_url:      {BASE_URL}",
         f"temperature:   {TEMPERATURE}",
-        f"context_limit: {CONTEXT_LIMIT or '-'}",
+        f"context_limit: {fmt_tokens(CONTEXT_LIMIT) if CONTEXT_LIMIT else '-'}",
         f"api_key:       {'задан' if API_KEY else 'НЕ задан'} "
         f"(env {API.get('api_key_env') or 'DEEPSEEK_API_KEY'})",
         f"skills_dir:    {', '.join(str(p) for p in skills_candidates()) or 'нет'}",

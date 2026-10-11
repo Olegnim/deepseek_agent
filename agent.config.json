@@ -6,7 +6,8 @@
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-flash",
     "temperature": 0.2,
-    "context_limit": 65536
+    "_context_limit_help": "Лимит контекста для полосы заполнения: число или строка с суффиксом k/M (65536, \"128k\", \"1M\"). 0 = показывать только количество токенов.",
+    "context_limit": "1M"
   },
   "paths": {
     "project_root": "",
