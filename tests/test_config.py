@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -94,11 +96,8 @@ def test_substitutions_in_strings_lists_and_dicts(project, apply_config,
     assert "abc123" in config.agent_instructions()
 
 
-@pytest.mark.xfail(reason="известный дефект config.setup(): первый проход подстановок "
-                          "выполняется без переменной project_root, поэтому "
-                          "${project_root} в конфиге превращается в пустую строку "
-                          "и путь теряет корень проекта", strict=False)
 def test_project_root_substitution_in_config_values(project, apply_config):
+    """${project_root} раскрывается: на первом проходе подстановка сохраняется."""
     apply_config({"paths": {"skills_dir": "${project_root}/my-skills"}})
 
     assert config.PATHS["skills_dir"] == f"{project}/my-skills"
@@ -208,6 +207,25 @@ def test_settings_summary_mentions_project(project):
     assert "model:" in summary
 
 
+# ---------- MCP roots ----------
+
+def test_mcp_roots_defaults_to_project_root(project):
+    assert config.mcp_roots() == [project.resolve()]
+
+
+def test_mcp_roots_from_config_with_substitution(apply_config, project):
+    apply_config({"mcp": {"roots": ["${project_root}", "shared"]}})
+
+    assert config.mcp_roots() == [project.resolve(), (project / "shared").resolve()]
+
+
+def test_mcp_roots_ignores_broken_value(apply_config, project):
+    """Не список/строка в конфиге не ломает старт: корнем остаётся проект."""
+    apply_config({"mcp": {"roots": 42}})
+
+    assert config.mcp_roots() == [project.resolve()]
+
+
 def test_lint_section_works_as_top_level_key(project, apply_config):
     """Рабочий вариант — секция lint верхнего уровня."""
     apply_config({"lint": {"enabled": False}})
@@ -215,11 +233,54 @@ def test_lint_section_works_as_top_level_key(project, apply_config):
     assert config.lint_settings()["enabled"] is False
 
 
-@pytest.mark.xfail(reason="известный дефект config.setup(): DEFAULTS всегда содержит "
-                          "секцию lint, поэтому fallback на tools.lint недостижим — "
-                          "там заданные правила автолинта игнорируются", strict=False)
 def test_lint_section_falls_back_to_tools_lint(project, apply_config):
-    """Правила автолинта задуманы работоспособными и в секции tools.lint."""
+    """Правила автолинта работают и в устаревшей секции tools.lint."""
     apply_config({"tools": {"lint": {"enabled": False}}})
 
     assert config.lint_settings()["enabled"] is False
+
+
+# ---------- Python-интерпретатор (macOS / Linux / Windows) ----------
+
+def test_python_exe_is_current_interpreter():
+    assert Path(config.python_exe()).name.lower().startswith("python")
+    assert config.python_exe() == (sys.executable or "python")
+
+
+def test_python_command_quotes_interpreter_and_spaced_args():
+    command = config.python_command("-m", "pytest")
+
+    assert command == f'"{config.python_exe()}" -m pytest'
+    assert '"два слова"' in config.python_command("-c", "два слова")
+
+
+def test_is_python_command_variants():
+    assert config.is_python_command("python -m py_compile a.py")
+    assert config.is_python_command("python3 -m pytest")
+    assert config.is_python_command("py -3 -m pytest")
+    assert config.is_python_command('"C:/Python311/python.exe" -V')
+    assert not config.is_python_command("php -l a.php")
+    assert not config.is_python_command("")
+
+
+def test_is_python_command_handles_quoted_path_with_spaces():
+    """Путь с пробелами в кавычках — тоже Python (`"C:/Program Files/...")`."""
+    assert config.is_python_command('"C:/Program Files/Python/python.exe" -V')
+    assert config.is_python_command('"C:/Python311/python.exe" -m pytest')
+    assert not config.is_python_command('"C:/Program Files/Git/git.exe" --version')
+
+
+def test_split_command_splits_program_and_rest():
+    assert config.split_command("python -m pytest") == ("python", "-m pytest")
+    assert config.split_command("  py -3   -m pytest ") == ("py", "-3   -m pytest")
+    assert config.split_command('"C:/Program Files/Python/python.exe" -V') == \
+        ("C:/Program Files/Python/python.exe", "-V")
+    assert config.split_command("php") == ("php", "")
+    assert config.split_command("") == ("", "")
+
+
+def test_python_hint_mentions_interpreter_and_pytest():
+    hint = config.python_hint()
+
+    assert config.python_exe() in hint
+    assert "pytest" in hint

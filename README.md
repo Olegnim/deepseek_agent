@@ -4,7 +4,9 @@ CLI-агент на Python для написания и правки кода (*
 
 Возможности: инструменты (чтение/правка файлов, grep, shell, git, веб-поиск без ключей), **автолинт синтаксиса** после каждой правки, **навыки** (skills) и **профили** (роли) агента, **снапшоты** правок с откатом, подключение внешних **MCP-серверов**.
 
-> **Кроссплатформенность.** Примеры даны для Windows/PowerShell. На Linux/macOS: замените `python` → `python3`, а обратные слэши в путях `\` → `/`. Все команды, кроме установки переменной окружения, одинаковы.
+> **Кроссплатформенность.** Примеры в основном даны для Windows/PowerShell. На Linux/macOS: замените `python` → `python3`, а обратные слэши в путях `\` → `/`. Все команды, кроме установки переменной окружения, одинаковы.
+>
+> **Про `python` и `python3`.** На Windows интерпретатор обычно доступен как `python` (или `py`), на macOS/Linux — как `python3`. Сам агент к этой разнице устойчив: автолинт Python-файлов, подсказки в промпте и `--doctor` используют интерпретатор, которым запущен агент (`sys.executable`), а не жёстко зашитое имя команды. Поэтому там, где ниже написано `python`, на macOS/Linux подставляйте `python3`.
 
 ```
 <AGENT_HOME>/                 # папка агента — определяется автоматически из расположения agent.py
@@ -31,19 +33,40 @@ CLI-агент на Python для написания и правки кода (*
 ### 1. Python 3.10 или новее
 
 ```powershell
-python --version
+# Windows
+python --version      # если не найден — попробуйте: py --version
+```
+
+```bash
+# Linux / macOS
+python3 --version
 ```
 
 Не найден? Установите с [python.org](https://www.python.org/downloads/) (в установщике — галка **Add python.exe to PATH**).
 **Linux/macOS:** `sudo apt install python3 python3-venv python3-pip` (Debian/Ubuntu) или `brew install python3` (macOS).
 
+Проверить, каким интерпретатором пользуется агент, можно в любой момент: `python3 agent.py --doctor` — в блоке **Утилиты** есть строка «интерпретатор агента».
+
 ### 2. Зависимости
 
 ```powershell
+# Windows
 python -m pip install -r "<AGENT_HOME>\requirements.txt"
 # если файла под рукой нет:
 python -m pip install openai mcp rich prompt_toolkit
 ```
+
+```bash
+# Linux / macOS
+python3 -m pip install -r "<AGENT_HOME>/requirements.txt"
+```
+
+> **Ubuntu 24.04 и новее (PEP 668).** Системный Python помечен как externally
+> managed, поэтому `python3 -m pip install` без виртуального окружения падает
+> с `error: externally-managed-environment`. Правильный путь — виртуальное
+> окружение (раздел «Виртуальное окружение» ниже). Разовое исключение —
+> `python3 -m pip install --break-system-packages -r …`, но так пакеты уезжают
+> в системный Python и могут конфликтовать с пакетами из `apt`.
 
 `openai` и `mcp` обязательны; `rich` и `prompt_toolkit` — только для цветного вывода и истории команд (без них агент работает в упрощённом режиме).
 
@@ -51,6 +74,11 @@ python -m pip install openai mcp rich prompt_toolkit
 
 ```powershell
 python "<AGENT_HOME>\agent.py" --doctor
+```
+
+```bash
+# Linux / macOS
+python3 "<AGENT_HOME>/agent.py" --doctor
 ```
 
 Покажет пути, найденные конфиги, навыки, MCP-серверы, доступные утилиты и статус пакетов/ключа. Если в блоке «Пакеты Python» есть `✗ openai`/`✗ mcp` — вернитесь к шагу 2.
@@ -77,6 +105,13 @@ export DEEPSEEK_API_KEY="sk-ваш-ключ"
 cd "<PROJECT_ROOT>"                        # корень вашего проекта
 python "<AGENT_HOME>\agent.py"             # интерактивный режим
 python "<AGENT_HOME>\agent.py" -t "Проверь синтаксис PHP в src и исправь ошибки"   # разовая задача
+```
+
+```bash
+# Linux / macOS
+cd "<PROJECT_ROOT>"
+python3 "<AGENT_HOME>/agent.py"
+python3 "<AGENT_HOME>/agent.py" -t "Проверь синтаксис PHP в src и исправь ошибки"
 ```
 
 Корень проекта агент берёт из папки запуска, свою папку — из расположения `agent.py`. **Не запускайте агент из его собственной папки** — иначе корнем проекта станет сама папка агента (тогда задайте `-p <PROJECT_ROOT>`).
@@ -139,6 +174,8 @@ python -m pip install -r "<AGENT_HOME>/requirements.txt"
 
 **Автолинт:** после `write_file`/`edit_file` агент сам проверяет синтаксис по правилам из секции `lint` (`php -l`, `node --check`, `python -m py_compile`, `javac`, `kotlinc`, `swiftc`) и добавляет результат к ответу. Утилита не найдена или правила нет — шаг пропускается. Отключить: `"lint": { "enabled": false }`.
 
+Правила для Python (`python -m py_compile`) выполняются **интерпретатором самого агента** (`sys.executable`), поэтому работают и на macOS/Linux, где команды `python` нет, и на Windows с `py`-launcher-ом (`py -3 …` тоже понимается). Байткод линта складывается во временный каталог системы (`PYTHONPYCACHEPREFIX`), а не в `__pycache__` проекта — автолинт не мусорит в чужом репозитории.
+
 **Работа в VS Code (`vscode`):** если установлено расширение из `vscode-extension/`, агент открывает правленые файлы в новых вкладках, умеет их закрывать, показывать в проводнике и открывать дифф со снапшотом — работу агента видно прямо в редакторе. Расширение поднимает **мост** на `127.0.0.1` и пишет порт с токеном в `.agent-cache/vscode-bridge.json`.
 
 Интеграция **необязательная и отказоустойчивая**: если VS Code не запущен, расширение не установлено, файл-дескриптор битый или мост не отвечает — инструменты `vscode_*` просто не показываются модели, авто-открытие пропускается, агент работает как обычно. Никаких исключений и зависаний; принудительно выключается через `"vscode": { "enabled": false }`.
@@ -195,6 +232,7 @@ python "<AGENT_HOME>\agent.py" --profile php                 # роль PHP-ра
 | `agent.instructions` | Доп. правила проекта (строка/список, попадают в промпт) |
 | `paths.project_root` | Пусто = папка запуска |
 | `paths.mcp_config` / `paths.skills_dir` / `paths.backup_dir` | Пути к MCP-конфигам / навыкам / снапшотам |
+| `mcp.roots` | Папки, которые агент объявляет MCP-серверам как разрешённые (roots/list); пусто = корень проекта |
 | `lint.enabled` / `lint.rules` | Автолинт и правила (`{file}` — путь к файлу) |
 | `tools.shell_timeout` | Таймаут shell-команд, сек |
 | `tools.web.*` | Веб-поиск: `enabled`, `timeout`, `max_chars`, `results` |
@@ -259,6 +297,20 @@ python "<AGENT_HOME>\agent.py" --profile php       # роль PHP-разрабо
 - Сервер с `"enabled": false` пропускается. Статус — по `:mcp`.
 - MCP-инструменты, меняющие файлы/выполняющие команды, проходят через подтверждение (отключается `--yes`).
 
+### Разрешённые папки (roots/list)
+
+Агент объявляет серверам разрешённые папки сам — протоколом MCP roots, а не только аргументами команды:
+
+- по умолчанию это корень проекта (`paths.project_root`);
+- папки из `args` сервера добавляются автоматически, поэтому доступ не сужается;
+- список можно расширить секцией `mcp.roots` в `agent.config.json` (относительные пути — от корня проекта, `${project_root}` работает):
+
+```json
+{ "mcp": { "roots": ["${project_root}", "~/shared"] } }
+```
+
+Если сервер пишет в stderr `Client does not support MCP Roots, using allowed directories set from server args` — значит клиент не объявил capability `roots`; агент версии ≥ этого изменения объявляет её, как только есть хотя бы одна существующая папка. Посмотреть, что объявлено, можно командой `:config` (строка `mcp_roots:`) или инструментом `filesystem__list_allowed_directories`.
+
 ---
 
 ## Интеграция с VS Code
@@ -306,7 +358,7 @@ python "<AGENT_HOME>\agent.py" --profile php       # роль PHP-разрабо
 
 ### Запуск агента задачами VS Code
 
-`.vscode/tasks.json` из репозитория уже готов (команда `python`/`python3` выбирается по ОС): откройте папку **своего проекта** в VS Code и запустите задачу через **Ctrl+Shift+P → `Tasks: Run Task` → `DeepSeek: …`**. Терминал VS Code стартует в корне проекта, поэтому `-p` не нужен.
+`.vscode/tasks.json` из репозитория уже готов (команда `python`/`python3` выбирается по ОС): откройте папку **своего проекта** в VS Code и запустите задачу через **Ctrl+Shift+P → `Tasks: Run Task` → `DeepSeek: …`**. Терминал VS Code стартует в корне проекта, поэтому `-p` не нужен. Задача `DeepSeek: tests (pytest)` запускает `pytest` в папке агента (на macOS/Linux — `python3 -m pytest`, на Windows — `python -m pytest`).
 
 Если `tasks.json` лежит в другом проекте — используйте в нём `${env:DEEPSEEK_AGENT_HOME}/agent.py` и задайте переменную с путём к папке агента (`setx DEEPSEEK_AGENT_HOME "..."` / `export DEEPSEEK_AGENT_HOME="..."`).
 
@@ -316,15 +368,20 @@ python "<AGENT_HOME>\agent.py" --profile php       # роль PHP-разрабо
 
 | Симптом | Решение |
 |---|---|
-| `python` не найден / открывается Microsoft Store | Установите Python 3.10+ и отметьте **Add python.exe to PATH**; новый терминал. На Linux/macOS используйте `python3`. Отключить заглушку Store: `Параметры → Приложения → Псевдонимы выполнения приложения` |
+| `python` не найден / открывается Microsoft Store | На Windows: установите Python 3.10+ и отметьте **Add python.exe to PATH**; новый терминал. На macOS/Linux команды `python` обычно нет — используйте `python3`. Отключить заглушку Store: `Параметры → Приложения → Псевдонимы выполнения приложения` |
+| `No module named pytest` при запуске тестов | pytest не установлен или стоит в другом интерпретаторе: `python -m pip install -r requirements-dev.txt`, затем сверьте `python -c "import sys; print(sys.executable)"` и `python -m pip -V`. В `--doctor` блок **Пакеты Python** показывает `✓ pytest` и актуальную команду установки |
 | `ERROR: переменная окружения DEEPSEEK_API_KEY не установлена` | Задайте переменную (`setx` / `export`) и перезапустите терминал — либо `api.api_key` в локальном `.agent.config.json` |
 | `pip` ставит пакеты «не туда», агент не видит `openai`/`mcp` | Пакеты и агент должны использовать один интерпретатор: `python -m pip -V` и `python -c "import sys; print(sys.executable)"`; активируйте venv в том же терминале |
+| `error: externally-managed-environment` (Ubuntu 24.04+, Debian 12+) | Системный Python защищён PEP 668. Активируйте venv (`python3 -m venv …` + `source …/bin/activate`) и ставьте зависимости в него, либо разово `python3 -m pip install --break-system-packages -r requirements.txt` |
 | `Could not find a version that satisfies the requirement mcp` | Региональное зеркало pip без свежих пакетов: `python -m pip install mcp -i https://mirrors.aliyun.com/pypi/simple/` |
 | Агент работает не с тем проектом | Корень = папка запуска. Не запускайте из папки агента; проверьте `--doctor`/`:config`, задайте `-p`, `DEEPSEEK_PROJECT_ROOT` или `.agent.config.json` |
 | `JSONDecodeError` при старте | Битый конфиг (лишняя запятая, неэкранированный `\`). Абсолютные пути — через прямые слэши `D:/work/site` |
-| MCP-сервер не подключается | Проверьте `npx`/`uvx` в PATH, запустите команду сервера вручную, проверьте `"enabled"` и раскрытие `${project_root}` (запуск из папки проекта) |
+| MCP-сервер не подключается | Проверьте `npx`/`uvx` в PATH, запустите команду сервера вручную, проверьте `"enabled"` и раскрытие `${project_root}` (запуск из папки проекта). На Windows агенту не нужно писать `npx.cmd`: команда ищется в PATH сама, а `.cmd`/`.bat` запускаются через `cmd /c` |
+| В stderr сервера: `Client does not support MCP Roots, using allowed directories set from server args` | Это информационная строка сервера (например, `server-filesystem`), а не ошибка: клиент не объявил capability `roots`, и сервер взял папки из своих аргументов. Агент объявляет `roots` сам — проверьте, что PATH папок существует и что версия кода свежая (`:config`, строка `mcp_roots:`; расширить список — секция `mcp.roots`) |
 | Консоль показывает «кракозябры» | Агент сам переключает вывод в UTF-8; используйте Windows Terminal / PowerShell 7, для старых консолей — `chcp 65001` |
 | `Путь вне проекта запрещён` | Так и задумано (песочница). Проверьте корень — `:project`/`:config` |
+| «файл не найден», хотя файл есть | Разное написание имени: регистр (`src/file.py` vs `SRC/File.py`) или Unicode-форма (macOS хранит имена в NFD, а модель присылает NFC). Агент подбирает фактическое имя сам — проверьте путь в `:project` и точное имя в `list_dir`/`grep` |
+| Windows: `OSError`/`WinError 206` при снапшоте («слишком длинный путь») | Снапшоты повторяют структуру проекта внутри `.agent-cache/backups/<дата>/`, и путь удлиняется. Включите длинные пути (`git config --system core.longpaths true` и/или политика `LongPathsEnabled` в реестре) или вынесите кэш из проекта: в `agent.config.json` укажите `paths.backup_dir` = `${env:TEMP}/deepseek-agent-backups` |
 | `:vscode`: «мост не найден» | Расширение не установлено или VS Code не открыт с проектом. Поднимите автоматически: `:vscode start` (или `auto_start: false` → откройте проект сами). Установка расширения — `vscode-extension/README.md` |
 | `:vscode`: «файл моста есть, но VS Code не отвечает» | VS Code закрылся аварийно — `:vscode restart` или перезапустите редактор |
 | Автозапуск пишет «CLI VS Code (`code`) не найден в PATH» | В PATH нет команды `code`: в VS Code выполните **Ctrl+Shift+P → `Shell Command: Install 'code' command in PATH`**, затем перезапустите терминал |
@@ -337,11 +394,22 @@ python "<AGENT_HOME>\agent.py" --profile php       # роль PHP-разрабо
 ## Тесты
 
 ```powershell
+# Windows
 python -m pip install -r "<AGENT_HOME>\requirements-dev.txt"   # pytest
 cd "<AGENT_HOME>"
-python -m pytest                      # все тесты, ~5 секунд
+python -m pytest                      # все тесты, ~3 секунды
 python -m pytest tests/test_config.py -v
 ```
+
+```bash
+# Linux / macOS
+python3 -m pip install -r "<AGENT_HOME>/requirements-dev.txt"
+cd "<AGENT_HOME>"
+python3 -m pytest
+python3 -m pytest tests/test_config.py -v
+```
+
+Если `python -m pytest` пишет «No module named pytest» — pytest поставлен не в тот интерпретатор: сверьте `python -c "import sys; print(sys.executable)"` с выводом `python -m pip -V` (в `--doctor` есть блок **Пакеты Python** с пометкой о pytest).
 
 Тесты не ходят в сеть, не обращаются к DeepSeek API и не требуют внешних
 утилит: модель подменяется заглушками, страницы — фейковым «опенером», а
@@ -349,22 +417,22 @@ python -m pytest tests/test_config.py -v
 
 | Файл | Что покрывает |
 |---|---|
-| `tests/test_config.py` | приоритет корня проекта (`-p` > env > конфиг > cwd), слоистые конфиги, подстановки, лимиты, профили, пути к ресурсам |
+| `tests/test_config.py` | приоритет корня проекта (`-p` > env > конфиг > cwd), слоистые конфиги, подстановки (в т.ч. `${project_root}`), лимиты, профили, пути к ресурсам, выбор Python-команды |
 | `tests/test_filesystem.py` | `read_file`/`read_range` (границы и обрезка), `write_file`, `edit_file` (первое вхождение, `replace_all`, CRLF/LF), `grep`, схема проекта |
-| `tests/test_linter.py` | выбор правила по расширению, OK/ОШИБКА, пропуск без утилиты, добавление отчёта к правке |
-| `tests/test_agent_core.py` | песочница `safe_path`, выполнение инструментов, снапшот+линт вокруг `write_file`, отказ пользователя, список инструментов для модели, системный промпт, команды REPL, токены |
+| `tests/test_linter.py` | выбор правила по расширению, OK/ОШИБКА, пропуск без утилиты, подстановка интерпретатора, отсутствие `__pycache__` в проекте, добавление отчёта к правке |
+| `tests/test_agent_core.py` | песочница `safe_path`, выполнение инструментов, снапшот+линт вокруг `write_file`, отказ пользователя, список инструментов для модели, системный промпт, команды REPL, токены, настройки API из конфига проекта |
 | `tests/test_agent_loop.py` | цикл задачи: пары assistant→tool, ошибки инструментов и битый JSON аргументов, loop-guard, лимит шагов, сбой API, ретраи |
 | `tests/test_stack_skills.py` | определение стека по маркерным файлам, front-matter `SKILL.md`, отбор навыков по `applies_to` и по профилю |
 | `tests/test_snapshot_cache.py` | снапшоты (путь, лимит `max_backups`), подсчёт и очистка `.agent-cache` |
 | `tests/test_loop_guard.py` | предупреждение, остановка, сброс счётчика при другом результате |
 | `tests/test_web.py` | SSRF-фильтр адресов, преобразование HTML, разбор выдачи DuckDuckGo (без сети) |
-| `tests/test_mcp.py` | конфиг MCP, подстановки, схемы инструментов, префикс `сервер__инструмент`, ошибки вызова |
+| `tests/test_mcp.py` | конфиг MCP, подстановки, схемы инструментов, префикс `сервер__инструмент`, ошибки вызова, roots/list |
 | `tests/test_vscode.py` | дескриптор моста и битые данные, песочница путей, сообщения при закрытом редакторе |
-| `tests/test_shell_git.py` | рабочая папка и код возврата shell, убийство команды по таймауту, git status/diff/log |
+| `tests/test_shell_git.py` | рабочая папка и код возврата shell, убийство команды по таймауту, git status/diff/log (включая русский текст в диффе) |
 
-Четыре теста помечены `xfail` — это **известные дефекты**, зафиксированные в
-разделе «Известные проблемы» файла [`CHANGELOG.md`](CHANGELOG.md), а не ошибки
-прогона: они станут `XPASS`, как только дефекты будут исправлены.
+Прогон должен быть полностью зелёным: известные дефекты 0.1.0 (настройки
+`api.*` при `-p`, `${project_root}` в конфиге, секция `tools.lint`, кодировка
+вывода git) исправлены — `xfail`-маркеров в тестах больше нет.
 
 ---
 

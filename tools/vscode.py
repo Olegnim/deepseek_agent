@@ -402,7 +402,8 @@ def extension_installed(cli: str | None = None, force: bool = False) -> bool:
     try:
         proc = subprocess.run(  # noqa: S603 — cli берётся из PATH
             _cli_argv(cli, "--list-extensions"),
-            capture_output=True, text=True, timeout=15, check=False,
+            capture_output=True, text=True, errors="replace",
+            timeout=15, check=False,
         )
         installed = BRIDGE_EXTENSION in (proc.stdout or "").lower()
     except (OSError, subprocess.SubprocessError) as e:

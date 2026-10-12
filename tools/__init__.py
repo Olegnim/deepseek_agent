@@ -141,6 +141,8 @@ TOOLS = [
             "name": "run_shell",
             "description": "Run a shell command (php -l, node --check, python -m "
                            "pytest, git status, etc.). Working dir = project root. "
+                           "For Python use the interpreter reported in the system "
+                           "prompt ('python' may be absent on macOS/Linux). "
                            "Timeout is configurable (tools.shell_timeout, default "
                            "60s). Returns exit code + stdout + stderr.",
             "parameters": {

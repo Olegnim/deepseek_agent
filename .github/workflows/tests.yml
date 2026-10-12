@@ -1,0 +1,37 @@
+name: tests
+
+# Прогон тестов на всех поддерживаемых ОС: агент кроссплатформенный, а без
+# матрицы регрессии в путях, кодировках и именах команд ловятся только вручную.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Минимальная и максимальная поддерживаемые версии (см. requirements.txt).
+        python: ["3.10", "3.12"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Тесты
+        # Ключ DeepSeek не нужен: тесты не ходят в сеть и не запускают MCP-серверы.
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m pytest -q

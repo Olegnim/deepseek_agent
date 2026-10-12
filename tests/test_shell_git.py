@@ -88,10 +88,8 @@ def test_git_status_and_diff_in_repository(project):
 
 
 @needs_git
-@pytest.mark.xfail(reason="tools/git.py читает вывод git без encoding='utf-8': "
-                          "на Windows с кодировкой консоли cp1251 русский текст "
-                          "в диффе превращается в мусор", strict=False)
 def test_git_diff_keeps_non_ascii_text(project):
+    """Вывод git читается как UTF-8 независимо от кодовой страницы консоли."""
     subprocess.run(["git", "init", "-q"], cwd=project, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=project,
                    check=True)

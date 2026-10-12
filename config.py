@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 
 # ---------- Папка агента: определяется автоматически ----------
@@ -80,6 +81,12 @@ DEFAULTS: dict = {
         "backup_dir": ".agent-cache/backups",
         # Дополнительные папки модулей/плагинов агента (можно указать список).
         "plugins_dirs": ["plugins"],
+    },
+    # MCP: какие папки агент объявляет серверам как «корни» (roots/list).
+    "mcp": {
+        # Пусто = только paths.project_root. Пути можно задавать относительно
+        # проекта; подстановка ${project_root} работает.
+        "roots": [],
     },
     "snapshots": {
         "max_backups": 50,
@@ -247,8 +254,14 @@ def env_value(name: str, default: str = "") -> str:
     return default
 
 
-def expand_vars(value, variables: dict) -> object:
-    """Раскрывает ${env:VAR}, ${agent_home}, ${project_root} в строках/списках/dict."""
+def expand_vars(value, variables: dict, keep: tuple[str, ...] = ()) -> object:
+    """Раскрывает ${env:VAR}, ${agent_home}, ${project_root} в строках/списках/dict.
+
+    keep — имена подстановок, которые на этом проходе ещё не вычислены:
+    они остаются в строке как есть (например, ${project_root} на первом
+    проходе), а не превращаются в пустую строку. Неизвестные имена по-прежнему
+    дают пустую строку, чтобы битый конфиг не ронял загрузку.
+    """
     variables = variables or {}
     if isinstance(value, str):
         def repl(match: re.Match) -> str:
@@ -257,13 +270,17 @@ def expand_vars(value, variables: dict) -> object:
                 return env_value(key[4:].strip())
             if key == "agent_dir":
                 key = "agent_home"
-            return str(variables.get(key, ""))
+            if key in variables:
+                return str(variables[key])
+            if key in keep:
+                return match.group(0)
+            return ""
 
         return _VAR_RE.sub(repl, value)
     if isinstance(value, dict):
-        return {k: expand_vars(v, variables) for k, v in value.items()}
+        return {k: expand_vars(v, variables, keep) for k, v in value.items()}
     if isinstance(value, list):
-        return [expand_vars(v, variables) for v in value]
+        return [expand_vars(v, variables, keep) for v in value]
     return value
 
 
@@ -368,7 +385,7 @@ def setup(cli_project_root: str | None = None) -> Path:
     передан флаг -p или нужен свежий расчёт после смены cwd).
     """
     global SETTINGS, API, PATHS, SNAPSHOTS, CACHE, AGENT_CFG, TOOLS_CFG, WEB, LINT
-    global PROFILES, LOOP_GUARD, VSCODE
+    global PROFILES, LOOP_GUARD, VSCODE, MCP_CFG
     global PROJECT_ROOT, LOADED_CONFIGS
     global API_KEY, BASE_URL, MODEL, TEMPERATURE, CONTEXT_LIMIT, MAX_BACKUPS
     global MAX_STEPS, API_RETRIES, SHELL_TIMEOUT
@@ -385,14 +402,18 @@ def setup(cli_project_root: str | None = None) -> Path:
 
     merged = dict(DEFAULTS)
     loaded: list[Path] = []
+    files_data: list[dict] = []          # то, что реально прочитано из файлов
     for path in paths_to_load:
         data = _read_json(path)
         if data:
+            files_data.append(data)
             merged = deep_merge(merged, data)
             loaded.append(path)
 
-    # 1-й проход: ${env:...} и ${agent_home}
-    merged = expand_vars(merged, {"agent_home": str(AGENT_HOME)})
+    # 1-й проход: ${env:...} и ${agent_home}; ${project_root} пока не известен,
+    # поэтому его оставляем как есть — раскроется на втором проходе.
+    merged = expand_vars(merged, {"agent_home": str(AGENT_HOME)},
+                         keep=("project_root",))
 
     # project_root уже решён — конфиги его не переопределяют.
     merged.setdefault("paths", {})["project_root"] = str(root)
@@ -414,11 +435,21 @@ def setup(cli_project_root: str | None = None) -> Path:
     WEB = deep_merge(DEFAULTS["tools"]["web"], TOOLS_CFG.get("web") or {})
     # Интеграция с редактором VS Code (секция "vscode" верхнего уровня).
     VSCODE = deep_merge(DEFAULTS["vscode"], merged.get("vscode") or {})
+    # Корни MCP (roots/list): какие папки агент отдаёт серверам как разрешённые.
+    MCP_CFG = deep_merge(DEFAULTS["mcp"], merged.get("mcp") or {})
     # Автолинтер: секция "lint" верхнего уровня или tools.lint (оба варианта).
-    LINT = deep_merge(
-        DEFAULTS["lint"],
-        merged.get("lint") or TOOLS_CFG.get("lint") or {},
-    )
+    # Берём только то, что реально задано в файлах: у DEFAULTS секция lint есть
+    # всегда, поэтому merged.get("lint") перекрыл бы tools.lint и устаревший
+    # вариант конфига не работал бы.
+    lint_explicit: dict = {}
+    for data in files_data:
+        tools_lint = (data.get("tools") or {}).get("lint")
+        if isinstance(tools_lint, dict):
+            lint_explicit = deep_merge(lint_explicit, tools_lint)
+        top_lint = data.get("lint")
+        if isinstance(top_lint, dict):
+            lint_explicit = deep_merge(lint_explicit, top_lint)
+    LINT = deep_merge(DEFAULTS["lint"], lint_explicit)
     PROJECT_ROOT = root
     LOADED_CONFIGS = loaded
 
@@ -451,7 +482,9 @@ def load_settings(path: str | os.PathLike | None = None) -> dict:
     """Читает один конфиг и раскрывает подстановки (без проектного оверрайда)."""
     cfg_path = Path(path) if path else CONFIG_PATH
     merged = deep_merge(DEFAULTS, _read_json(cfg_path))
-    merged = expand_vars(merged, {"agent_home": str(AGENT_HOME)})
+    # ${project_root} ещё не вычислен — оставляем подстановку до второго прохода.
+    merged = expand_vars(merged, {"agent_home": str(AGENT_HOME)},
+                         keep=("project_root",))
 
     raw_root = str((merged.get("paths") or {}).get("project_root") or "").strip()
     root = _normalize_path(raw_root, cfg_path.parent) if raw_root else Path.cwd().resolve()
@@ -476,6 +509,7 @@ TOOLS_CFG: dict = {}
 WEB: dict = {}
 VSCODE: dict = {}
 LINT: dict = {}
+MCP_CFG: dict = {}
 PROFILES: dict = {}
 LOOP_GUARD: dict = {}
 # Переопределение профиля на время сессии (флаг --profile / команда :profile).
@@ -572,6 +606,30 @@ def mcp_config_path(project_root: str | os.PathLike | None = None) -> Path | Non
     """Первый (приоритетный) конфиг MCP. Оставлено для совместимости."""
     paths = mcp_config_paths(project_root)
     return paths[0] if paths else None
+
+
+def mcp_roots(project_root: str | os.PathLike | None = None) -> list[Path]:
+    """Папки, которые агент объявляет MCP-серверам как «корни» (roots/list).
+
+    Берётся секция `mcp.roots` из конфига; пустая (по умолчанию) — значит
+    единственный корень это сам проект. Относительные пути считаются от
+    корня проекта, `~` и `${project_root}` раскрываются как везде.
+    Если в конфиге заданы только несуществующие пути, возвращается проект —
+    иначе сервер остался бы без разрешённых папок.
+    """
+    root = Path(project_root or PROJECT_ROOT).resolve()
+    raw = MCP_CFG.get("roots") if MCP_CFG else None
+    if not isinstance(raw, (list, tuple, str)):
+        raw = None
+    result: list[Path] = []
+    for item in _as_list(raw):
+        value = str(item).strip()
+        if not value:
+            continue
+        path = _normalize_path(value, root)
+        if path not in result:
+            result.append(path)
+    return result or [root]
 
 
 def backup_dir(project_root: str | os.PathLike | None = None) -> Path:
@@ -673,6 +731,84 @@ def shell_timeout() -> int:
     return SHELL_TIMEOUT
 
 
+# ---------- Python-интерпретатор: кросс-платформенные команды ----------
+
+def python_exe() -> str:
+    """Путь к интерпретатору Python, которым запущен сам агент.
+
+    Команда `python` есть не везде (на macOS и Debian/Ubuntu обычно только
+    `python3`), а `py` — только на Windows. Поэтому все Python-команды,
+    которые агент показывает модели и выполняет сам (автолинт, тесты),
+    строятся от sys.executable — рабочая команда на любой ОС.
+    """
+    return sys.executable or "python"
+
+
+def python_command(*args: str) -> str:
+    """Команда запуска Python с аргументами, готовая для run_shell.
+
+    Пример: python_command("-m", "pytest") ->
+            '"<путь>/python3" -m pytest'   (в Windows — '...\\python.exe').
+    """
+    parts = [f'"{python_exe()}"']
+    parts += [f'"{a}"' if " " in str(a) else str(a) for a in args]
+    return " ".join(parts)
+
+
+def python_hint() -> str:
+    """Подсказка про интерпретатор Python для системного промпта и :doctor.
+
+    Без неё модель пишет `python -m pytest`, что не работает на macOS/Linux,
+    где команды `python` может не быть.
+    """
+    exe = python_exe()
+    name = Path(exe).name or "python"
+    return (f'Интерпретатор Python этой системы: "{exe}" (команда `{name}`). '
+            f"Python-команды запускай от него: тесты — "
+            f"run_shell('{python_command('-m', 'pytest')}'), "
+            f"пример из правил автолинта — "
+            f"run_shell('{python_command('-m', 'py_compile', 'путь/файл.py')}').")
+
+
+# Первое слово команды: в кавычках ("C:/Program Files/Python/python.exe") или без.
+_CMD_SPLIT_RE = re.compile(r"""\s*("([^"]*)"|'([^']*)'|(\S+))(?:\s+(.*))?$""",
+                           re.DOTALL)
+
+
+def split_command(command: str) -> tuple[str, str]:
+    """Делит команду на программу и остаток: ('python', '-m pytest').
+
+    Кавычки учитываются, поэтому путь с пробелами
+    (`"C:/Program Files/Python/python.exe" -m py_compile a.py`) разбирается
+    правильно — именно такой вид даёт `python_command()` и правила автолинта.
+    Раньше деление шло по первому пробелу, и такой путь распознавался как
+    «python» со «остатком» `/Program Files/...`, то есть команда ломалась.
+    """
+    text = (command or "").strip()
+    match = _CMD_SPLIT_RE.match(text)
+    if not match:
+        return text, ""
+    program = match.group(2) or match.group(3) or match.group(4) or ""
+    return program, (match.group(5) or "").strip()
+
+
+def is_python_command(command: str) -> bool:
+    """Команда запускает Python: python / python3 / py (в т.ч. с путём и .exe)?
+
+    Понимает кавычки, полный путь и пути с пробелами, например
+    `"C:/Python311/python.exe" -V` или
+    `"C:/Program Files/Python/python.exe" -V` или `'python3 -m pytest'`.
+    """
+    program, _ = split_command(command)
+    if not program:
+        return False
+    name = Path(program).name.lower()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name in {"python", "python3", "py"}
+
+
 def lint_settings() -> dict:
     """Настройки автолинтера (секция "lint" в agent.config.json)."""
     return LINT
@@ -772,6 +908,7 @@ def settings_summary() -> str:
         f"(env {API.get('api_key_env') or 'DEEPSEEK_API_KEY'})",
         f"skills_dir:    {', '.join(str(p) for p in skills_candidates()) or 'нет'}",
         f"mcp_config:    {', '.join(str(p) for p in mcp)}",
+        f"mcp_roots:     {', '.join(str(p) for p in mcp_roots())}",
         f"backup_dir:    {backup_dir()} (max {MAX_BACKUPS})",
         f"max_steps:     {'без ограничений' if MAX_STEPS <= 0 else MAX_STEPS}   "
         f"(повторов API при сбое: {API_RETRIES})",

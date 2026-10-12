@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import config
 from tools import linter
 
 PY_RULE = {
@@ -99,3 +100,53 @@ def test_describe_rules_marks_missing_tools(project, apply_config):
 
     assert any("php-no-such-binary" in line and "нет утилиты" in line for line in lines)
     assert any(".py" in line and "нет утилиты" not in line for line in lines)
+
+
+def test_python_rule_uses_current_interpreter(project, apply_config):
+    """`python ...` в правиле заменяется на интерпретатор, которым идёт агент.
+
+    Иначе правило не работало бы на macOS/Linux, где команды `python` нет.
+    """
+    _apply_rules(apply_config, [PY_RULE])
+
+    command = linter.manual_command(PY_RULE)
+
+    assert command.startswith(f'"{config.python_exe()}"')
+    assert "{file}" not in command
+
+
+def test_python_launcher_flag_is_dropped(project, apply_config):
+    """`py -3 ...` (launcher Windows) не тащит свой флаг к конкретному python."""
+    rule = {"ext": [".py"], "command": "py -3 -m py_compile {file}",
+            "label": "py_compile"}
+    _apply_rules(apply_config, [rule])
+
+    command = linter.manual_command(rule)
+
+    assert command == f'"{config.python_exe()}" -m py_compile'
+
+
+def test_lint_does_not_create_pycache_in_project(project, apply_config):
+    """Байткод линта не сыплется в дерево проекта: он идёт в кэш интерпретатора."""
+    _apply_rules(apply_config, [PY_RULE])
+    (project / "ok.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert linter.lint_file(project / "ok.py") == "линт python -m py_compile: OK"
+    assert not (project / "__pycache__").exists()
+
+
+def test_python_rule_with_quoted_path_and_spaces(project, apply_config):
+    """Путь к интерпретатору с пробелами в кавычках — рабочее правило.
+
+    Раньше первое слово разбиралось по первому пробелу, поэтому такая команда
+    считалась отсутствующей утилитой и линт молча пропускался.
+    """
+    rule = {"ext": [".py"],
+            "command": '"C:/Program Files/Python/python.exe" -m py_compile {file}',
+            "label": "py_compile"}
+    _apply_rules(apply_config, [rule])
+    (project / "ok.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert linter._missing_tool(rule["command"]) is None
+    assert linter.lint_file(project / "ok.py") == "линт py_compile: OK"
+    assert linter.manual_command(rule).startswith(f'"{config.python_exe()}"')

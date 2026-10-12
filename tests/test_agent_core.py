@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,26 @@ def test_safe_path_inside_project(agent_module, project):
     assert agent_module.safe_path(str(project)) == project.resolve()
 
 
+def test_shell_hint_describes_current_platform_shell(agent_module, monkeypatch):
+    """Подсказка про оболочку должна соответствовать ОС, а не быть «средней»."""
+    monkeypatch.setattr(agent_module.os, "name", "nt")
+    windows_hint = agent_module._shell_hint()
+
+    assert "cmd.exe" in windows_hint
+    assert "export" in windows_hint          # с пометкой, что команды нет
+    assert "`;`" in windows_hint             # предупреждение про разделитель
+
+    monkeypatch.setattr(agent_module.os, "name", "posix")
+    posix_hint = agent_module._shell_hint()
+
+    assert "/bin/sh" in posix_hint
+    assert "`;`" in posix_hint
+
+
+def test_system_prompt_contains_shell_section(agent_module):
+    assert "Оболочка:" in agent_module.build_system_prompt()
+
+
 @pytest.mark.parametrize("path", ["../outside.txt", "src/../../outside.txt", ".."])
 def test_safe_path_blocks_paths_outside_project(agent_module, path):
     with pytest.raises(ValueError):
@@ -31,6 +52,44 @@ def test_safe_path_blocks_paths_outside_project(agent_module, path):
 def test_safe_path_blocks_absolute_path_outside(agent_module, tmp_path):
     with pytest.raises(ValueError):
         agent_module.safe_path(str(tmp_path / "another_project" / "file.py"))
+
+
+def test_safe_path_matches_case_insensitive_names(agent_module, project):
+    """Регистр в пути не должен мешать найти файл.
+
+    На Windows/macOS файловая система регистр не различает, на Linux — различает,
+    поэтому агент сам подбирает фактическое имя (проверка — по регистронезависимому
+    сравнению, чтобы тест был стабилен на всех ОС).
+    """
+    (project / "SRC").mkdir()
+    (project / "SRC" / "File.py").write_text("x = 1\n", encoding="utf-8")
+
+    found = agent_module.safe_path("src/file.py")
+
+    assert found.is_file()
+    assert str(found).lower() == str(project / "SRC" / "File.py").lower()
+
+
+def test_safe_path_matches_unicode_nfc_and_nfd(agent_module, project):
+    """macOS хранит имена в NFD, а модель присылает NFC — файл всё равно найден."""
+    nfc_name = unicodedata.normalize("NFC", "ёж.txt")
+    nfd_name = unicodedata.normalize("NFD", "ёж.txt")
+    (project / nfc_name).write_text("колючий\n", encoding="utf-8")
+
+    found = agent_module.safe_path(nfd_name)
+
+    assert found.is_file()
+    assert unicodedata.normalize("NFC", found.name) == nfc_name
+
+
+def test_safe_path_keeps_missing_new_file(agent_module, project):
+    """Новый файл остаётся новым, но существующая папка берётся в реальном виде."""
+    (project / "Src").mkdir()
+
+    found = agent_module.safe_path("src/New.py")
+
+    assert not found.exists()
+    assert str(found).lower() == str(project / "Src" / "New.py").lower()
 
 
 # ---------- Реестр инструментов ----------
@@ -228,12 +287,9 @@ def test_update_stats_ignores_missing_usage(agent_module):
 
 # ---------- Регрессия: настройки API после смены проекта ----------
 
-@pytest.mark.xfail(reason="CHANGELOG 0.1.0, «Известные проблемы»: значения api.* "
-                          "из конфига целевого проекта не применяются к запросам, "
-                          "если корень проекта задан флагом -p", strict=False)
 def test_api_request_uses_model_from_project_config(agent_module, apply_config,
                                                     monkeypatch):
-    """После config.setup() запрос должен уходить с моделью из проектного конфига."""
+    """После config.setup() запрос уходит с моделью из конфига проекта."""
     apply_config({"api": {"model": "project-model-xyz", "temperature": 0.9}})
 
     class FakeClient:

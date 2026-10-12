@@ -30,6 +30,7 @@ import shutil
 import platform
 import argparse
 import asyncio
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -68,16 +69,12 @@ except ImportError:
 
 import config as app_config
 from config import (
-    API_KEY,
-    BASE_URL,
-    MODEL,
-    TEMPERATURE,
-    CONTEXT_LIMIT,
     CONFIG_PATH,
     agent_home,
     backup_dir,
     cache_dir,
     mcp_config_paths,
+    mcp_roots,
     plugins_candidates,
     skills_candidates,
     settings_summary,
@@ -191,7 +188,7 @@ def _get_client() -> OpenAI:
                      f"или api.api_key в .agent.config.json.")
             sys.exit(1)
         client = OpenAI(api_key=app_config.API_KEY,
-                        base_url=app_config.BASE_URL or BASE_URL)
+                        base_url=app_config.BASE_URL)
     return client
 
 
@@ -221,7 +218,6 @@ TOKEN_STATS = {
 }
 
 CONTEXT_SIZE = 0
-CONTEXT_LIMIT = CONTEXT_LIMIT or 0
 
 # Спрашивать ли при старте REPL про очистку кэша (снимается флагом --no-cache-ask).
 ASK_CACHE_ON_START = True
@@ -232,11 +228,61 @@ TOOL_RESULT_LIMIT = 8000
 
 # ---------- Вспомогательные функции ----------
 
+def _nfc_casefold(text: str) -> str:
+    """Ключ сравнения имён файлов: Unicode-NFC + нижний регистр."""
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def _match_existing(path: Path, root: Path) -> Path:
+    """Возвращает фактический путь на диске (или исходный, если совпадений нет).
+
+    Разные файловые системы обращаются с именами по-разному: macOS хранит их
+    в NFD (а не в NFC, как присылает модель), Linux различает регистр, Windows
+    и macOS — нет. Без этой поправки файл «src/Файл.py» из ответа модели
+    молча не находился: `Path.is_file()` давал False.
+
+    Сопоставление идёт по компонентам от корня проекта: точное совпадение
+    выигрывает, иначе берётся первое имя, равное по NFC-форме без учёта
+    регистра. Несуществующий хвост (например, новый файл для write_file)
+    сохраняется как есть — писать его нужно в реальную папку.
+    """
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return path
+
+    parts = list(rel.parts)
+    current = root
+    for i, part in enumerate(parts):
+        candidate = current / part
+        if candidate.exists():
+            current = candidate
+            continue
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            break
+        key = _nfc_casefold(part)
+        match = next((e for e in entries if _nfc_casefold(e.name) == key), None)
+        if match is None:
+            return current.joinpath(*parts[i:])
+        current = match
+    return current
+
+
 def safe_path(path: str) -> Path:
+    """Путь внутри проекта; выход за его пределы — ошибка.
+
+    Если точного пути нет, пробуем найти фактический (`_match_existing`):
+    на macOS имена файлов в NFD, а на Windows/macOS ещё и регистр не важен —
+    так путь из ответа модели всё равно попадает в нужный файл.
+    """
     root = PROJECT_ROOT.resolve()
     p = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
     if p != root and not p.is_relative_to(root):
         raise ValueError(f"Путь вне проекта запрещён: {path}")
+    if not p.exists():
+        p = _match_existing(p, root)
     return p
 
 
@@ -337,20 +383,58 @@ def load_project_skills() -> str:
     )
 
 
+def _lint_has_python() -> bool:
+    """Есть ли среди правил автолинта проверка Python-файлов (.py)."""
+    for rule in config_lint_settings().get("rules") or []:
+        exts = rule.get("ext") or []
+        if isinstance(exts, str):
+            exts = [exts]
+        if any(str(e).lower() == ".py" for e in exts):
+            return True
+    return False
+
+
 def _tool_examples() -> str:
     """Примеры команд проверки — генерируются из правил автолинта.
 
     Никаких зашитых «php -l» в тексте промпта: если в проекте проверяется,
-    скажем, только Python, PHP-пример и не появится.
+    скажем, только Python, PHP-пример и не появится. Python-правила показаны
+    с реальным интерпретатором этой ОС: команды `python` на macOS/Linux может
+    не быть, а `py` есть только на Windows.
     """
     lines: list[str] = []
     for rule in config_lint_settings().get("rules") or []:
-        command = str(rule.get("command") or "").strip()
+        command = linter.manual_command(rule)
         if not command:
             continue
-        ext = command.replace(" {file}", "")
-        lines.append(f'  run_shell("{ext} путь/к/файлу")')
+        quote = "'" if '"' in command else '"'
+        lines.append(f"  run_shell({quote}{command} путь/к/файлу{quote})")
     return "\n".join(lines) if lines else "  (правила автолинта не заданы)"
+
+
+def _shell_hint() -> str:
+    """Что модели нужно знать про оболочку run_shell на этой ОС.
+
+    Без подсказки модель пишет команды «средней» ОС (`export`, `;`, `ls`),
+    и на Windows они просто не выполняются — выглядит как сбой агента.
+    """
+    if os.name == "nt":
+        return (
+            "Оболочка run_shell здесь — cmd.exe (Windows), поэтому:\n"
+            "- переменные: `set VAR=value && команда` — в одной команде; между\n"
+            "  вызовами run_shell окружение не сохраняется, команды `export` нет;\n"
+            "- разделители команд: `&&` или `&` (точка с запятой `;` не работает);\n"
+            "- кавычки — двойные (`cd /d \"C:\\путь с пробелами\"`);\n"
+            "- POSIX-утилит (ls, rm, sed, grep, cat, which) может не быть:\n"
+            "  используй `dir`, `del`, `type`, `findstr`, `where`."
+        )
+    return (
+        "Оболочка run_shell здесь — /bin/sh (Linux/macOS), поэтому:\n"
+        "- переменные: `VAR=value команда` или `export VAR=value`; между\n"
+        "  вызовами run_shell окружение не сохраняется;\n"
+        "- разделители команд: `;` или `&&`, кавычки — одинарные и двойные;\n"
+        "- пути — через `/`."
+    )
 
 
 def build_system_prompt() -> str:
@@ -419,6 +503,11 @@ def build_system_prompt() -> str:
     extra = config_agent_instructions()
     extra_block = f"\n\nДополнительные правила проекта:\n{extra}" if extra else ""
 
+    # Подсказка про интерпретатор нужна только там, где вообще есть Python.
+    python_info = ""
+    if _lint_has_python() or "python" in stack.lower():
+        python_info = f"\n\n{app_config.python_hint()}"
+
     profile = app_config.active_profile()
     profile_info = ""
     profile_block = ""
@@ -448,6 +537,8 @@ def build_system_prompt() -> str:
             '# или: run_shell("curl -s http://127.0.0.1:8124")'
         )
 
+    shell_hint = _shell_hint()
+
     return f"""Ты CLI-агент для написания и правки кода.
 Ты работаешь с проектом в директории: {PROJECT_ROOT}
 Система: {platform.system()} {platform.release()}
@@ -465,7 +556,7 @@ def build_system_prompt() -> str:
 - смотреть состояние репозитория: git_status, git_diff, git_log;{web_info}{vscode_info}
 - использовать инструменты MCP-серверов, если они подключены;
 - следовать правилам навыков (skills), описанных ниже.
-{mcp_info}{snapshot_info}{lint_info}
+{mcp_info}{snapshot_info}{lint_info}{python_info}
 
 Как решать типовые задачи:
 
@@ -486,7 +577,10 @@ def build_system_prompt() -> str:
   переформатирования чужих участков.
 - Не оставляй отладочный код (var_dump, print_r, console.log, print, dd) в правках.
 - Все пути — относительно корня проекта, без ведущего слэша.
-- Когда задача выполнена — дай короткое резюме изменений.{extra_block}
+- Когда задача выполнена — дай короткое резюме изменений.
+
+Оболочка:
+{shell_hint}{extra_block}
 
 Правила для фоновых процессов:
 - НЕ запускай долгоживущие серверы (php -S, node server.js, python -m http.server)
@@ -550,7 +644,8 @@ def _open_session_log() -> None:
         logs = cache_dir(PROJECT_ROOT) / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         LOG_PATH = logs / f"session-{datetime.now():%Y-%m-%d-%H%M%S}.log"
-        log_line("session", f"agent.py start, project={PROJECT_ROOT}, model={MODEL}")
+        log_line("session", f"agent.py start, project={PROJECT_ROOT}, "
+                            f"model={app_config.MODEL}")
     except OSError:
         LOG_PATH = None
 
@@ -665,9 +760,12 @@ def _update_stats(usage) -> None:
 
 
 def _context_bar() -> str:
-    if CONTEXT_LIMIT <= 0:
+    # Лимит читается из настроек (app_config): если проект задан флагом -p,
+    # config.setup() перечитывает конфиг, а константы импорта остаются старыми.
+    limit = app_config.CONTEXT_LIMIT or 0
+    if limit <= 0:
         return f"контекст: {fmt_num(CONTEXT_SIZE)} токенов"
-    pct = min(100, int(CONTEXT_SIZE * 100 / CONTEXT_LIMIT))
+    pct = min(100, int(CONTEXT_SIZE * 100 / limit))
     filled = int(pct / 5)
     bar = "█" * filled + "░" * (20 - filled)
     color = "green"
@@ -677,7 +775,7 @@ def _context_bar() -> str:
         color = "yellow"
     return (
         f"контекст: [{color}]{bar}[/{color}] "
-        f"{fmt_num(CONTEXT_SIZE)}/{fmt_num(CONTEXT_LIMIT)} ({pct}%)"
+        f"{fmt_num(CONTEXT_SIZE)}/{fmt_num(limit)} ({pct}%)"
     )
 
 
@@ -712,19 +810,24 @@ def print_stats(full: bool = False) -> None:
 
 
 def _api_request(messages: list, all_tools: list):
-    """Один (блокирующий) запрос к API. Со спиннером, если есть rich."""
+    """Один (блокирующий) запрос к API. Со спиннером, если есть rich.
+
+    model/temperature берутся из app_config, а не из констант, загруженных при
+    импорте: если корень проекта задан флагом -p, config.setup() перечитывает
+    конфиг, и запрос должен уйти с настройками именно этого проекта.
+    """
     if console:
         spinner = Spinner("dots", text=Text(" DeepSeek думает...", style="dim"))
         with Live(spinner, console=console, refresh_per_second=10, transient=True):
             return _get_client().chat.completions.create(
-                model=MODEL, messages=messages, tools=all_tools,
-                tool_choice="auto", temperature=TEMPERATURE,
+                model=app_config.MODEL, messages=messages, tools=all_tools,
+                tool_choice="auto", temperature=app_config.TEMPERATURE,
             )
     print("... DeepSeek думает", end="", flush=True)
     try:
         return _get_client().chat.completions.create(
-            model=MODEL, messages=messages, tools=all_tools,
-            tool_choice="auto", temperature=TEMPERATURE,
+            model=app_config.MODEL, messages=messages, tools=all_tools,
+            tool_choice="auto", temperature=app_config.TEMPERATURE,
         )
     finally:
         print("\r", end="")
@@ -952,10 +1055,11 @@ def cmd_tokens() -> None:
 
 def cmd_context() -> None:
     ui_print(_context_bar())
-    if CONTEXT_LIMIT > 0:
-        left = max(0, CONTEXT_LIMIT - CONTEXT_SIZE)
+    limit = app_config.CONTEXT_LIMIT or 0
+    if limit > 0:
+        left = max(0, limit - CONTEXT_SIZE)
         ui_info(f"Свободно в контексте: {fmt_num(left)} токенов")
-        if CONTEXT_SIZE > CONTEXT_LIMIT * 0.8:
+        if CONTEXT_SIZE > limit * 0.8:
             ui_print("[yellow]Контекст почти заполнен. "
                      "Рекомендую :clear и начать новую задачу.[/yellow]")
 
@@ -1390,34 +1494,47 @@ def cmd_doctor() -> None:
     print()
 
     ui_print("[bold]Утилиты[/bold]")
-    for name in ("npx", "node", "uvx", "php", "python", "python3",
+    for name in ("git", "npx", "node", "uvx", "php", "python", "python3", "py",
                  "javac", "kotlinc", "swiftc"):
         found = shutil.which(name)
         mark = "✓" if found else "✗"
         color = "green" if found else "dim"
         ui_print(f"  [{color}]{mark}[/{color}] {name}" +
                  (f"  {found}" if found else ""))
+    ui_print(f"  интерпретатор агента: {app_config.python_exe()}")
     print()
 
     ui_print("[bold]Пакеты Python[/bold]")
     import importlib.util
 
-    for module, required in (("openai", True), ("mcp", True),
-                             ("rich", False), ("prompt_toolkit", False)):
+    # pytest — не рантайм-зависимость, а инструмент разработки (requirements-dev.txt).
+    for module, required, hint in (
+        ("openai", True, "pip install -r requirements.txt"),
+        ("mcp", True, "pip install -r requirements.txt"),
+        ("rich", False, ""),
+        ("prompt_toolkit", False, ""),
+        ("pytest", False, "pip install -r requirements-dev.txt"),
+    ):
         found = importlib.util.find_spec(module) is not None
         if found:
             ui_print(f"  [green]✓[/green] {module}")
         elif required:
             ui_print(f"  [red]✗ {module} — обязателен. "
-                     "Установите: pip install -r requirements.txt[/red]")
+                     f"Установите: {hint}[/red]")
+        elif hint:
+            ui_print(f"  [yellow]~[/yellow] {module} — не установлен "
+                     f"(нужен для тестов: {hint})")
         else:
             ui_print(f"  [yellow]~[/yellow] {module} — не установлен "
                      "(необязателен, будет упрощённый режим)")
+    ui_print("  установка в текущий интерпретатор: "
+             f"{app_config.python_command('-m', 'pip', 'install', '-r', 'requirements-dev.txt')}",
+             style="dim")
     print()
 
     ui_print("[bold]API-ключ[/bold]")
     env_name = app_config.API.get("api_key_env") or "DEEPSEEK_API_KEY"
-    if API_KEY:
+    if app_config.API_KEY:
         if os.environ.get(env_name):
             source = "из переменной окружения"
         elif app_config.env_value(env_name):
@@ -1428,7 +1545,7 @@ def cmd_doctor() -> None:
     else:
         ui_print("  [red]✗ не найден[/red] — задайте DEEPSEEK_API_KEY "
                  "или api.api_key в .agent.config.json")
-    ui_print(f"  модель: {MODEL}   base_url: {BASE_URL}")
+    ui_print(f"  модель: {app_config.MODEL}   base_url: {app_config.BASE_URL}")
 
 
 def cmd_config() -> None:
@@ -1637,7 +1754,7 @@ async def main_async(args) -> None:
         log_line("cache", "cleared by --clear-cache")
 
     ui_print(f"[bold]DeepSeek Agent[/bold]  ·  проект: [cyan]{PROJECT_ROOT}[/cyan]")
-    ui_print(f"                ·  модель: [cyan]{MODEL}[/cyan]  "
+    ui_print(f"                ·  модель: [cyan]{app_config.MODEL}[/cyan]  "
              f"·  подтверждения: [cyan]{'выкл' if not CONFIRM_MODE else 'вкл'}[/cyan]")
     ui_info(f"агент: {agent_home()}")
     try:
@@ -1685,7 +1802,11 @@ async def main_async(args) -> None:
 
         if servers_by_name:
             mcp_manager = MCPManager()
-            await mcp_manager.connect(list(servers_by_name.values()))
+            # Корни отдаём клиентом (roots/list), а не аргументами сервера:
+            # иначе сервер пишет в stderr «Client does not support MCP Roots».
+            await mcp_manager.connect(
+                list(servers_by_name.values()), roots=mcp_roots(PROJECT_ROOT)
+            )
             ui_info(f"MCP: {len(mcp_manager.get_tools())} инструментов "
                     f"из {len(servers_by_name)} серверов "
                     f"({', '.join(str(p) for p in mcp_paths)})")

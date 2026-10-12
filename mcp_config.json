@@ -1,5 +1,5 @@
 {
-  "_readme": "MCP-серверы агента. Абсолютные пути можно не писать: используйте ${project_root} (берётся из agent.config.json), ${agent_dir}, ${env:VAR}. Сервер с \"enabled\": false пропускается.",
+  "_readme": "MCP-серверы агента. Абсолютные пути можно не писать: используйте ${project_root} (берётся из agent.config.json), ${agent_dir}, ${env:VAR}. Сервер с \"enabled\": false пропускается. Команда ищется в PATH сама (на Windows `npx` — это `npx.cmd`, он запускается через `cmd /c`), поэтому писать полные пути не нужно.",
 
   "mcpServers": {
     "filesystem": {

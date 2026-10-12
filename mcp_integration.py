@@ -7,11 +7,15 @@
 """
 
 import json
+import os
+import shutil
+from collections.abc import Iterable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 
 # Раскрытие ${env:VAR} / ${project_root} / ${agent_home} живёт в config.py,
@@ -31,6 +35,106 @@ class MCPServer:
     enabled: bool = True
 
 
+# ---------- Запуск команды сервера (кроссплатформенно) ----------
+
+def resolve_server_command(command: str,
+                           args: Sequence[str] | None = None) -> tuple[str, list[str]]:
+    """Готовит команду запуска MCP-сервера для текущей ОС.
+
+    MCP SDK (anyio) запускает процесс напрямую, без shell, и на Windows это
+    означает две проблемы: `npx` в PATH — это `npx.cmd`, который без shell
+    не находится (нужен полный путь, как его отдаёт `shutil.which` с PATHEXT),
+    а `.cmd`/`.bat` вообще нельзя запустить как исполняемый файл — только через
+    командный интерпретатор. Поэтому такие команды оборачиваются в `cmd /c`.
+    На Linux/macOS достаточно найденного в PATH пути.
+    """
+    text = str(command or "").strip()
+    launch_args = [str(a) for a in (args or [])]
+    if not text:
+        return text, launch_args
+
+    resolved = shutil.which(text) or text
+    if os.name == "nt" and resolved.lower().endswith((".cmd", ".bat")):
+        comspec = os.environ.get("COMSPEC") or "cmd.exe"
+        return comspec, ["/c", resolved, *launch_args]
+    return resolved, launch_args
+
+
+# ---------- MCP roots (разрешённые папки) ----------
+
+def root_entries(paths: Iterable[str | Path] | None) -> list[tuple[str, str]]:
+    """Превращает пути в пары (file-URI, имя папки) для протокола roots/list.
+
+    URI собирается через Path.as_uri(), поэтому одинаково работает и на macOS
+    (`file:///Users/...`), и на Windows (`file:///C:/Users/...`). Путь
+    нормализуется resolve() — это важно на macOS, где /tmp и /var это симлинки
+    на /private/..., и сервер сравнивает уже реальные пути.
+    Несуществующие папки отбрасываются: сервер такие корни всё равно отвергнет.
+    """
+    entries: list[tuple[str, str]] = []
+    for raw in paths or []:
+        path = Path(str(raw)).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        try:
+            path = path.resolve()
+        except OSError:
+            continue
+        if not path.is_dir():
+            continue
+        uri = path.as_uri()
+        if all(uri != existing for existing, _ in entries):
+            entries.append((uri, path.name or str(path)))
+    return entries
+
+
+def roots_for_server(roots: Iterable[str | Path] | None,
+                     args: Iterable[str] | None) -> list[str | Path]:
+    """Корни для одного сервера: настройки агента + папки из его аргументов.
+
+    Сервер мог получить разрешённые папки аргументами командной строки
+    (например, `server-filesystem /path/to/project`). Когда корни начинает
+    объявлять клиент, сервер заменяет ими список из аргументов — поэтому папки
+    из args добавляем в набор, чтобы доступ не сузился. Флаги и обычные файлы
+    пропускаются.
+    """
+    result: list[str | Path] = list(roots or [])
+    known = {str(item) for item in result}
+    for arg in args or []:
+        text = str(arg).strip()
+        if not text or text.startswith("-") or "://" in text:
+            continue
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.is_dir() or str(path) in known:
+            continue
+        known.add(str(path))
+        result.append(path)
+    return result
+
+
+def list_roots_handler(paths: Iterable[str | Path] | None):
+    """Колбэк `roots/list` для ClientSession или None, если корней нет.
+
+    Пока колбэк не передан, MCP SDK не объявляет серверу capability `roots`,
+    и сервер (например, @modelcontextprotocol/server-filesystem) сам решает,
+    какие папки разрешены: берёт их из аргументов командной строки и пишет в
+    stderr «Client does not support MCP Roots, using allowed directories set
+    from server args». С колбэком папки задаёт агент.
+    """
+    entries = root_entries(paths)
+    if not entries:
+        return None
+
+    async def handler(context: Any) -> types.ListRootsResult:
+        return types.ListRootsResult(
+            roots=[types.Root(uri=uri, name=name) for uri, name in entries]
+        )
+
+    return handler
+
+
 # ---------- Менеджер сессий ----------
 
 class MCPManager:
@@ -44,8 +148,14 @@ class MCPManager:
         # tool_name (с префиксом) -> {"server": str, "original_name": str}
         self._tool_map: dict[str, dict] = {}
 
-    async def connect(self, servers: list[MCPServer]) -> None:
+    async def connect(self, servers: list[MCPServer],
+                      roots: Sequence[str | Path] | None = None) -> None:
         """Подключается ко всем серверам и собирает список инструментов.
+
+        roots — папки из настроек агента (config.mcp_roots). Папки, переданные
+        серверу аргументами командной строки, добавляются автоматически.
+        Если валидных папок нет вовсе, клиент не объявляет capability `roots`,
+        и сервер использует папки из своих аргументов.
 
         Ошибка одного сервера не прерывает подключение остальных.
         """
@@ -54,10 +164,19 @@ class MCPManager:
                 print(f"[MCP] пропущен (enabled=false): {srv.name}")
                 continue
 
+            # Корни считаются для каждого сервера отдельно: его собственные
+            # папки-аргументы не «протекают» в другие серверы.
+            list_roots = list_roots_handler(roots_for_server(roots, srv.args))
+
             try:
+                # Путь/обёртку команды готовим сами: на Windows `npx` — это
+                # `npx.cmd`, который SDK (без shell) не найдёт.
+                launch_command, launch_args = resolve_server_command(
+                    srv.command, srv.args
+                )
                 params = StdioServerParameters(
-                    command=srv.command,
-                    args=srv.args,
+                    command=launch_command,
+                    args=launch_args,
                     env=srv.env,
                 )
 
@@ -65,7 +184,7 @@ class MCPManager:
                     stdio_client(params)
                 )
                 session = await self._exit_stack.enter_async_context(
-                    ClientSession(read, write)
+                    ClientSession(read, write, list_roots_callback=list_roots)
                 )
                 await session.initialize()
 

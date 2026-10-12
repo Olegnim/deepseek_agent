@@ -10,6 +10,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import mcp_integration
 from mcp_integration import MCPServer, MCPManager, load_mcp_servers
 
 
@@ -83,6 +84,68 @@ def test_unresolved_substitution_becomes_empty(project):
     servers = asyncio.run(load_mcp_servers(path, {"project_root": str(project)}))
 
     assert servers[0].args == [""]
+
+
+# ---------- Roots (разрешённые папки) ----------
+
+def test_list_roots_handler_returns_file_uris(project):
+    from mcp_integration import list_roots_handler
+
+    handler = list_roots_handler([project])
+    result = asyncio.run(handler(None))
+
+    assert handler is not None
+    assert str(result.roots[0].uri) == project.resolve().as_uri()
+    assert result.roots[0].name == project.name
+
+
+def test_list_roots_handler_resolves_relative_path_from_cwd(project):
+    from mcp_integration import list_roots_handler
+
+    result = asyncio.run(list_roots_handler(["."])(None))
+
+    assert str(result.roots[0].uri) == project.resolve().as_uri()
+
+
+def test_list_roots_handler_skips_missing_and_deduplicates(project):
+    from mcp_integration import list_roots_handler
+
+    handler = list_roots_handler([project, project, project / "нет-такой-папки"])
+    roots = asyncio.run(handler(None)).roots
+
+    assert [str(r.uri) for r in roots] == [project.resolve().as_uri()]
+
+
+def test_roots_for_server_keeps_directory_args(project):
+    """Папки из аргументов сервера не теряются при переходе на roots."""
+    from mcp_integration import roots_for_server
+
+    extra = project / "shared"
+    extra.mkdir()
+
+    roots = roots_for_server([project], ["-y", "@modelcontextprotocol/server-filesystem",
+                                         str(extra), "server.js", "--flag"])
+
+    assert [str(r) for r in roots] == [str(project), str(extra)]
+
+
+def test_roots_for_server_deduplicates_args(project):
+    from mcp_integration import roots_for_server
+
+    assert [str(r) for r in roots_for_server([project], [str(project)])] == [str(project)]
+
+
+def test_roots_for_server_is_empty_without_roots_and_args():
+    from mcp_integration import roots_for_server
+
+    assert roots_for_server(None, ["-y", "server.js"]) == []
+
+
+def test_list_roots_handler_is_none_without_paths():
+    from mcp_integration import list_roots_handler
+
+    assert list_roots_handler([]) is None
+    assert list_roots_handler(None) is None
 
 
 # ---------- Схемы инструментов ----------
@@ -198,3 +261,33 @@ def test_start_command_is_reported(capsys):
     assert "не удалось подключить x" in capsys.readouterr().out
     assert manager.get_tools() == []
     asyncio.run(manager.close())
+
+
+# ---------- Команда запуска сервера (Windows / POSIX) ----------
+
+def test_resolve_server_command_uses_path_lookup(monkeypatch):
+    monkeypatch.setattr(mcp_integration.shutil, "which",
+                        lambda name: "/usr/local/bin/npx")
+
+    assert mcp_integration.resolve_server_command("npx", ["-y", "srv"]) == \
+        ("/usr/local/bin/npx", ["-y", "srv"])
+
+
+def test_resolve_server_command_windows_wraps_cmd(monkeypatch):
+    """На Windows `npx` — это `npx.cmd`, запускать его нужно через cmd /c."""
+    monkeypatch.setattr(mcp_integration.os, "name", "nt")
+    monkeypatch.setattr(mcp_integration.shutil, "which",
+                        lambda name: r"C:\Program Files\nodejs\npx.cmd")
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
+
+    command, args = mcp_integration.resolve_server_command("npx", ["-y", "srv"])
+
+    assert command == r"C:\Windows\System32\cmd.exe"
+    assert args == ["/c", r"C:\Program Files\nodejs\npx.cmd", "-y", "srv"]
+
+
+def test_resolve_server_command_keeps_unresolved_command(monkeypatch):
+    monkeypatch.setattr(mcp_integration.shutil, "which", lambda name: None)
+
+    assert mcp_integration.resolve_server_command("uvx", []) == ("uvx", [])
+    assert mcp_integration.resolve_server_command("", ["a"]) == ("", ["a"])

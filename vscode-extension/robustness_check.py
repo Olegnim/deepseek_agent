@@ -2,7 +2,7 @@
 
 Запускать из корня проекта:
 
-    python vscode-extension/robustness_check.py
+    python vscode-extension/robustness_check.py     # на macOS/Linux — python3
 
 Скрипт временно подменяет .agent-cache/vscode-bridge.json (файла не было —
 он удаляется в конце) и проверяет четыре сценария: моста нет, дескриптор

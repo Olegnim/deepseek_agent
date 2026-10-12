@@ -24,14 +24,21 @@
 
 Если правило для расширения не найдено или утилита отсутствует в PATH —
 проверка молча пропускается (lint_file возвращает None / пояснение).
+
+Кроссплатформенность: Python-правила выполняются интерпретатором самого агента
+(`config.python_exe()`, он же `sys.executable`), потому что на macOS и
+Debian/Ubuntu команды `python` может не быть, а `py` есть только на Windows.
+Байткод линта уходит в системный временный каталог (`PYTHONPYCACHEPREFIX`),
+а не в `__pycache__` проекта.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
-import sys
+import tempfile
 from pathlib import Path
 
 import config
@@ -78,16 +85,21 @@ def _display_path(p: Path) -> str:
 
 
 def _missing_tool(command: str) -> str | None:
-    """Имя утилиты, которой нет в PATH, либо None. Первое слово команды."""
-    first = (command or "").strip().split()[0] if (command or "").strip() else ""
-    if not first:
+    """Имя утилиты, которой нет в PATH, либо None. Первое слово команды.
+
+    Первое слово разбирается с учётом кавычек (`config.split_command`),
+    иначе правило с путём (`"C:/Program Files/Python/python.exe" -m …`)
+    выглядело как отсутствующая утилита и проверка молча пропускалась.
+    """
+    program, _ = config.split_command(command)
+    if not program:
         return "(пустая команда)"
     # python/python3/py — считаем доступными: линт идёт через sys.executable
     # (см. _resolve_interpreter), который есть всегда.
-    if first in {"python", "python3", "py"}:
+    if config.is_python_command(command):
         return None
-    if shutil.which(first) is None:
-        return first
+    if shutil.which(program) is None:
+        return program
     return None
 
 
@@ -97,12 +109,43 @@ def _resolve_interpreter(command: str) -> str:
     На Debian/Ubuntu и macOS команды `python` может не быть (только `python3`),
     а `py` есть только на Windows. Подстановка sys.executable гарантирует, что
     проверка пойдёт тем же интерпретатором, что и агент, на любой ОС.
+
+    Служебный флаг `py -3` / `py -3.11` (выбор версии в launcher-е Windows)
+    отбрасывается: у нас уже конкретный интерпретатор.
     """
-    parts = command.split(" ", 1)
-    if parts[0] in {"python", "python3", "py"}:
-        rest = parts[1] if len(parts) > 1 else ""
-        return f'"{sys.executable}" {rest}'.rstrip()
-    return command
+    if not config.is_python_command(command):
+        return command
+    _, rest = config.split_command(command)
+    rest_parts = rest.split()
+    if rest_parts and re.fullmatch(r"-3(\.\d+)?", rest_parts[0]):
+        rest = " ".join(rest_parts[1:])
+    return f'"{config.python_exe()}" {rest}'.rstrip()
+
+
+def manual_command(rule: dict) -> str:
+    """Команда правила без {file} — для подсказок модели (`:doctor`, промпт).
+
+    Python-команды показываются с реальным интерпретатором: `python -m ...`
+    на macOS/Linux просто не запустится.
+    """
+    template = " ".join(str(rule.get("command") or "").replace("{file}", "").split())
+    return _resolve_interpreter(template)
+
+
+def _command_env(command: str) -> dict | None:
+    """Дополнительные переменные окружения для команды.
+
+    Для Python-команд байткод складывается в системный временный каталог,
+    а не в `__pycache__` проекта: автолинт не должен мусорить в чужом
+    репозитории (и не засоряет счётчик .agent-cache).
+    """
+    if not config.is_python_command(command):
+        return None
+    env = os.environ.copy()
+    env["PYTHONPYCACHEPREFIX"] = str(
+        Path(tempfile.gettempdir()) / "deepseek-agent-pycache"
+    )
+    return env
 
 
 def lint_file(path: str | os.PathLike) -> str | None:
@@ -143,9 +186,11 @@ def lint_file(path: str | os.PathLike) -> str | None:
             shell=True,
             capture_output=True,
             text=True,
+            errors="replace",       # не падать на выводе утилит в другой кодировке
             timeout=timeout,
             stdin=subprocess.DEVNULL,
             cwd=str(config.PROJECT_ROOT),
+            env=_command_env(command),
         )
     except subprocess.TimeoutExpired:
         return f"линт {label}: таймаут {timeout} с — проверка прервана"

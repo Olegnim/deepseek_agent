@@ -12,6 +12,12 @@ const bridgeFile = path.join(dir, 'vscode-bridge.json');
 const token = crypto.randomBytes(16).toString('hex');
 const calls = [];
 
+// Интерпретатор Python: на macOS/Linux команды `python` обычно нет (только
+// `python3`), поэтому выбираем её так же, как это делает сам агент.
+// Переопределить можно переменной DEEPSEEK_AGENT_PYTHON.
+const pyExe = process.env.DEEPSEEK_AGENT_PYTHON
+  || (process.platform === 'win32' ? 'python' : 'python3');
+
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
@@ -47,7 +53,7 @@ server.listen(0, '127.0.0.1', () => {
     'print(v.auto_open("config.py"))',
   ].join('\n');
 
-  const child = spawn('python', ['-c', py], {
+  const child = spawn(pyExe, ['-c', py], {
     cwd: root,
     // Дочерний Python пишет UTF-8 — иначе на Windows кириллица в выводе
     // превращается в мусор при чтении из Node.
@@ -56,6 +62,15 @@ server.listen(0, '127.0.0.1', () => {
   let out = '';
   child.stdout.on('data', (d) => (out += d));
   child.stderr.on('data', (d) => (out += d));
+
+  child.on('error', (e) => {
+    console.log('--- python не запустился ---');
+    console.log(`${pyExe}: ${e.message}`);
+    console.log('Укажите интерпретатор: DEEPSEEK_AGENT_PYTHON=/путь/python node selftest.js');
+    try { fs.unlinkSync(bridgeFile); } catch (_) {}
+    server.close();
+    process.exit(1);
+  });
 
   child.on('close', (code) => {
     console.log('--- python (exit ' + code + ') ---');

@@ -1,0 +1,20 @@
+# Единые переводы строк в репозитории: в истории и в индексе — LF,
+# на диске git сам отдаёт то, что принято в ОС (core.autocrlf не нужен).
+# Так правки, сделанные агентом в Windows, не превращаются в дифф «весь файл
+# изменился» на Linux/macOS, и наоборот.
+* text=auto eol=lf
+
+# Windows-скрипты обязаны оставаться с CRLF, иначе их ломает cmd.exe/PowerShell.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Бинарные файлы: без нормализации и без попыток склеивать их как текст.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.vsix binary
+*.jar binary
