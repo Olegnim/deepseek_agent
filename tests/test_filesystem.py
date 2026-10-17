@@ -22,6 +22,43 @@ def test_read_file_returns_content(project):
     assert fs.read_file(str(path)) == "привет\nмир"
 
 
+def test_read_file_decodes_non_utf8_file(project):
+    """Файл в cp1251 (типично для старых Windows-проектов) читается, а не теряется."""
+    path = project / "legacy.php"
+    path.write_bytes("<?php // привет\n".encode("cp1251"))
+
+    assert "привет" in fs.read_file(str(path))
+
+
+def test_read_range_keeps_non_utf8_text(project):
+    path = project / "legacy.php"
+    path.write_bytes("<?php\n// привет\n".encode("cp1251"))
+
+    assert "привет" in fs.read_range(str(path), 1, 5)
+
+
+def test_edit_file_preserves_cp1251_encoding(project):
+    """Правка не перекодирует файл: байты остаются в исходной кодировке."""
+    path = project / "legacy.php"
+    path.write_bytes("<?php // привет\n".encode("cp1251"))
+
+    result = fs.edit_file(str(path), "привет", "пока")
+
+    assert "Заменено" in result
+    assert path.read_bytes().decode("cp1251") == "<?php // пока\n"
+
+
+def test_edit_file_keeps_utf8_bom(project):
+    """BOM (частая метка файлов из Windows-редакторов) не теряется при правке."""
+    path = project / "bom.txt"
+    path.write_bytes("привет\n".encode("utf-8-sig"))
+
+    assert "Заменено" in fs.edit_file(str(path), "привет", "пока")
+    data = path.read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf")
+    assert data.decode("utf-8-sig") == "пока\n"
+
+
 def test_read_file_truncates_large_files(project):
     path = project / "big.txt"
     path.write_text("x" * (fs.MAX_READ_BYTES + 1000), encoding="utf-8")

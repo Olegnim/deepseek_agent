@@ -114,19 +114,19 @@ from tools import vscode as vscode_tools
 from tools.filesystem import project_outline
 from tools.stack import stack_summary, detect_tags
 from tools.cache import cache_overview, clear_cache, format_overview, human_size
-from skills_loader import load_skill_map, load_skills_for_stack
+from skills_loader import load_skills_for_stack
 from mcp_integration import MCPManager, load_mcp_servers
+from plugins_loader import PluginLoadResult, load_plugins
 
 # --- Snapshot (автоснапшоты перед правкой) ---
 try:
     from tools import snapshot
-    from tools.snapshot import snapshot_file, snapshot_dir
+    from tools.snapshot import snapshot_file
     HAS_SNAPSHOT = True
 except ImportError:
     HAS_SNAPSHOT = False
     snapshot = None
     snapshot_file = None
-    snapshot_dir = None
 
 
 # ---------- UI-хелперы ----------
@@ -258,6 +258,9 @@ WRITE_TOOLS = {
     "filesystem__move_file", "filesystem__create_directory",
 }
 mcp_manager: MCPManager | None = None
+# Итог загрузки плагинов (см. _load_plugins): подключённые имена, инструменты,
+# ошибки. Заполняется на старте, чтобы `--doctor` и баннер показали результат.
+PLUGINS: PluginLoadResult | None = None
 
 # Статистика за сессию
 TOKEN_STATS = {
@@ -779,6 +782,35 @@ def build_system_prompt() -> str:
 Навыки проекта:
 {skills or "(навыки не найдены)"}{profile_block}
 """
+
+
+# ---------- Плагины (доп. инструменты из plugins/) ----------
+
+def _load_plugins() -> None:
+    """Подключает плагины: инструменты из папок `paths.plugins_dirs`.
+
+    Папки ищутся по цепочке «проект → папка агента» (config.plugins_candidates),
+    каждый плагин — .py-файл с `register(api)` (см. plugins_loader.py).
+    Ошибки плагинов печатаются, но старт агента не прерывают.
+    """
+    global PLUGINS
+    try:
+        PLUGINS = load_plugins(reserved=set(REGISTRY))
+    except Exception as e:  # noqa: BLE001 — плагины не должны ронять старт
+        PLUGINS = None
+        ui_error(f"плагины: {type(e).__name__}: {e}")
+        return
+
+    if PLUGINS.tools:
+        TOOLS.extend(PLUGINS.tools)
+        REGISTRY.update(PLUGINS.handlers)
+        # Опасные инструменты плагина ведут себя как write_file: подтверждение
+        # и блокировка в режиме планирования.
+        DANGEROUS_TOOLS.update(PLUGINS.dangerous)
+        WRITE_TOOLS.update(PLUGINS.dangerous)
+
+    for error in PLUGINS.errors:
+        ui_error(f"плагин: {error}")
 
 
 # ---------- Сборка списка инструментов с дедупликацией ----------
@@ -2071,9 +2103,18 @@ def cmd_doctor() -> None:
     dirs = plugins_candidates(PROJECT_ROOT)
     if dirs:
         for path in dirs:
-            ui_print(f"  ✓ {path}")
+            ui_print(f"  ✓ папка: {path}")
     else:
         ui_print("  ~ папок plugins/ нет (ключ paths.plugins_dirs)", style="dim")
+    if PLUGINS and PLUGINS.loaded:
+        ui_print(f"  ✓ подключено плагинов: {len(PLUGINS.loaded)} — "
+                 f"{', '.join(PLUGINS.loaded)}")
+        ui_print(f"  инструментов от плагинов: {len(PLUGINS.handlers)}")
+    elif dirs:
+        ui_print("  ~ плагинов не найдено (файлы *.py с функцией register(api))",
+                 style="dim")
+    for error in (PLUGINS.errors if PLUGINS else []):
+        ui_print(f"  ✗ {error}", style="red")
     print()
 
     ui_print("[bold]Утилиты[/bold]")
@@ -2298,6 +2339,7 @@ async def main_async(args) -> None:
         if args.profile:
             app_config.set_profile(args.profile)
         _open_session_log()
+        _load_plugins()
         if args.clear_cache:
             ui_print(clear_cache(PROJECT_ROOT), style="green")
         cmd_doctor()
@@ -2348,6 +2390,10 @@ async def main_async(args) -> None:
 
     _open_session_log()
 
+    # Плагины: дополнительные инструменты из plugins/ (до сборки промпта и
+    # списка инструментов — иначе модель их не увидит).
+    _load_plugins()
+
     if args.clear_cache:
         ui_print(clear_cache(PROJECT_ROOT), style="green")
         log_line("cache", "cleared by --clear-cache")
@@ -2385,6 +2431,8 @@ async def main_async(args) -> None:
     log_line("profile", app_config.agent_profile() or "auto")
     for conf in app_config.LOADED_CONFIGS:
         ui_info(f"конфиг: {conf}")
+    if PLUGINS and (PLUGINS.loaded or PLUGINS.errors):
+        ui_info(f"плагины: {PLUGINS.summary()}")
     if HAS_SNAPSHOT:
         ui_info(f"автоснапшоты: включены ({backup_dir(PROJECT_ROOT)})")
     else:

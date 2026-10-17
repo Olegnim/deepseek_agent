@@ -68,14 +68,19 @@ directories set from server args` — значит клиент не объяв�
    сборки и Node.js:
 
    ```powershell
-   # Windows (PowerShell) — junction на папку vscode-extension
-   New-Item -ItemType Junction -Path "$env:USERPROFILE\.vscode\extensions\deepseek-agent-bridge" -Target "<AGENT_HOME>\vscode-extension"
+   # Windows (PowerShell) — junction на папку vscode-extension.
+   # Имя папки — <publisher>.<name>-<version> из package.json: с другим именем
+   # VS Code расширение не увидит.
+   New-Item -ItemType Junction -Path "$env:USERPROFILE\.vscode\extensions\deepseek-agent.deepseek-agent-bridge-0.1.0" -Target "<AGENT_HOME>\vscode-extension"
    ```
 
    ```bash
    # Linux / macOS — симлинк
-   ln -s "<AGENT_HOME>/vscode-extension" ~/.vscode/extensions/deepseek-agent-bridge
+   ln -s "<AGENT_HOME>/vscode-extension" ~/.vscode/extensions/deepseek-agent.deepseek-agent-bridge-0.1.0
    ```
+
+   Если версия в `package.json` изменится, переименуйте папку так же (или
+   переустановите расширение через VSIX).
 
    Другие варианты (VSIX через `npx @vscode/vsce`, отладка через F5) — в
    [`../vscode-extension/README.md`](../vscode-extension/README.md).

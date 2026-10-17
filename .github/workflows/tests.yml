@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         # Минимальная и максимальная поддерживаемые версии (см. requirements.txt).
-        python: ["3.10", "3.12"]
+        python: ["3.10", "3.13"]
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +29,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
+
+      - name: Синтаксис расширения VS Code
+        # Node есть на всех раннерах; проверяем JS без сборки расширения.
+        run: |
+          node --check vscode-extension/extension.js
+          node --check vscode-extension/selftest.js
 
       - name: Тесты
         # Ключ DeepSeek не нужен: тесты не ходят в сеть и не запускают MCP-серверы.

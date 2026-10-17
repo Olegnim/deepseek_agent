@@ -3,6 +3,9 @@
 Все пути приходят уже абсолютными (их преобразует safe_path в agent.py).
 """
 
+import codecs
+import io
+import locale
 import os
 import re
 from pathlib import Path
@@ -42,6 +45,35 @@ CODE_EXTENSIONS = (
 )
 
 
+def _detect_encoding(data: bytes) -> str:
+    """Кодировка файла по его началу.
+
+    Проекты на Windows нередко лежат в cp1251/cp866. Читать их как UTF-8
+    с `errors="ignore"` нельзя: кириллица молча исчезала, а `edit_file`
+    перезаписывал файл в UTF-8 и терял исходные байты. Порядок проверки:
+    UTF-8 (в т.ч. с BOM), затем кодировка локали, cp1251, cp866.
+    """
+    if data.startswith(codecs.BOM_UTF8):
+        return "utf-8-sig"
+    probe = data[:65536]
+    # Хвост обрезанного сэмпла может попасть в середину многобайтового символа.
+    for candidate in (probe, probe[:-4] if len(probe) > 4 else probe):
+        try:
+            candidate.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        return "utf-8"
+    for enc in dict.fromkeys((locale.getpreferredencoding(False), "cp1251", "cp866")):
+        if not enc:
+            continue
+        try:
+            probe.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        return enc
+    return "utf-8"
+
+
 def read_file(path: str) -> str:
     """Читает файл целиком (с ограничением по размеру)."""
     p = Path(path)
@@ -53,16 +85,23 @@ def read_file(path: str) -> str:
         return (f"Это изображение ({p.name}): текстом оно не читается. "
                 "Вызови read_image с тем же путём, чтобы показать его модели.")
     size = p.stat().st_size
-    if size > MAX_READ_BYTES:
-        with open(p, "r", encoding="utf-8", errors="ignore") as f:
-            head = f.read(MAX_READ_BYTES)
+    truncated = size > MAX_READ_BYTES
+    try:
+        with open(p, "rb") as f:
+            data = f.read(MAX_READ_BYTES if truncated else size + 1)
+    except OSError as e:
+        return f"ERROR: не удалось прочитать {path}: {e}"
+    head = data.decode(_detect_encoding(data), errors="replace")
+    # Переводы строк приводим к "\n" (как раньше делал текстовый режим):
+    # модель получает переносимый текст, а реальные CRLF сохраняет edit_file.
+    head = head.replace("\r\n", "\n").replace("\r", "\n")
+    if truncated:
         return (
             f"[файл обрезан: показаны первые {MAX_READ_BYTES} из {size} байт. "
             f"Для чтения конкретного участка используй read_range(path, start, end).]\n"
             + head
         )
-    with open(p, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read()
+    return head
 
 
 def read_range(path: str, start: int = 1, end: int = 200) -> str:
@@ -85,13 +124,19 @@ def read_range(path: str, start: int = 1, end: int = 200) -> str:
         end = start + MAX_READ_RANGE_LINES - 1
 
     lines: list[str] = []
-    with open(p, "r", encoding="utf-8", errors="ignore") as f:
-        for i, line in enumerate(f, 1):
-            if i < start:
-                continue
-            if i > end:
-                break
-            lines.append(f"{i:>6}: {line.rstrip()}")
+    try:
+        with open(p, "rb") as raw:
+            enc = _detect_encoding(raw.read(65536))
+            raw.seek(0)
+            stream = io.TextIOWrapper(raw, encoding=enc, errors="replace")
+            for i, line in enumerate(stream, 1):
+                if i < start:
+                    continue
+                if i > end:
+                    break
+                lines.append(f"{i:>6}: {line.rstrip()}")
+    except OSError as e:
+        return f"ERROR: не удалось прочитать {path}: {e}"
 
     if not lines:
         return f"(строки {start}-{end} пусты или файл короче)"
@@ -114,7 +159,8 @@ def edit_file(path: str, old_text: str, new_text: str,
     replace_all=False (по умолчанию) — только первое вхождение.
     Переводы строк в файле сохраняются (CRLF/LF), сравнение идёт
     по нормализованному тексту, поэтому фрагмент из модели с \\n
-    найдётся и в файле с \\r\\n.
+    найдётся и в файле с \\r\\n. Кодировка файла тоже сохраняется:
+    cp1251/cp866-файл не превращается в UTF-8 после правки.
     """
     p = Path(path)
     if not p.is_file():
@@ -122,8 +168,18 @@ def edit_file(path: str, old_text: str, new_text: str,
     if not old_text:
         return "ERROR: old_text пуст."
 
-    with open(p, "r", encoding="utf-8", newline="") as f:
-        source = f.read()
+    try:
+        with open(p, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return f"ERROR: не удалось прочитать {path}: {e}"
+
+    enc = _detect_encoding(data)
+    try:
+        source = data.decode(enc)
+    except UnicodeDecodeError:
+        return (f"ERROR: не удалось определить кодировку {path}. "
+                "Пересохраните файл в UTF-8 и повторите правку.")
 
     eol = "\r\n" if "\r\n" in source else "\n"
     norm_source = source.replace("\r\n", "\n")
@@ -137,8 +193,16 @@ def edit_file(path: str, old_text: str, new_text: str,
                 "текст точно, включая отступы.")
 
     updated = norm_source.replace(norm_old, norm_new, -1 if replace_all else 1)
-    with open(p, "w", encoding="utf-8", newline="") as f:
-        f.write(updated.replace("\n", eol))
+    try:
+        payload = updated.replace("\n", eol).encode(enc)
+    except UnicodeEncodeError:
+        return (f"ERROR: новый текст содержит символы, которых нет в кодировке "
+                f"{enc} файла {path}. Пересохраните файл в UTF-8 и повторите.")
+    try:
+        with open(p, "wb") as f:
+            f.write(payload)
+    except OSError as e:
+        return f"ERROR: не удалось записать {path}: {e}"
 
     replaced = found if replace_all else 1
     note = f" (всего вхождений: {found})" if found > 1 and not replace_all else ""

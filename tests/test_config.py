@@ -178,6 +178,20 @@ def test_mcp_config_and_skills_search_project_first(project):
                                                  config.AGENT_HOME / "skills"]
 
 
+def test_public_resource_helpers_stay_stable(project):
+    """Публичные хелперы конфига: ими пользуются внешние модули/плагины.
+
+    `agent_home_path` и `mcp_config_path` внутри агента не вызываются (есть
+    `agent_home`/`mcp_config_paths`), но помечены как совместимость — тест
+    фиксирует, что их нельзя «вычистить» как мёртвый код.
+    """
+    project_mcp = project / "mcp_config.json"
+    project_mcp.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+
+    assert config.agent_home_path() == config.AGENT_HOME
+    assert config.mcp_config_path(project) == project_mcp
+
+
 def test_plugins_candidates_returns_only_existing_dirs(project):
     assert config.plugins_candidates(project) == []
     plugins = project / "plugins"

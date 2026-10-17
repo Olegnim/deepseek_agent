@@ -7,7 +7,75 @@
 
 ## [Unreleased]
 
+### Исправлено
+
+- **Автолинт декодирует вывод утилит так же, как `run_shell`**: раньше
+  `text=True` брал кодировку локали, и на Windows кириллица в сообщении об
+  ошибке `node`/`php` превращалась в мусор. Теперь байты разбирает общий
+  `shell._decode` (UTF-8 → локаль → cp866/cp1251).
+- **Файловые инструменты определяют кодировку файла** (`tools/filesystem.py`):
+  `read_file`/`read_range` больше не теряют кириллицу в cp1251/cp866-файлах,
+  а `edit_file` пишет файл в исходной кодировке (и сохраняет BOM), а не
+  перезаписывает его в UTF-8. Нераспознанная кодировка — понятная ошибка.
+- `config.STREAM` по умолчанию `False` — как в `DEFAULTS` и `agent.config.json`
+  (раньше начальное значение до `setup()` расходилось с конфигом).
+
+### Удалено
+
+- Неиспользуемый код, у которого не было вызовов ни в одном коммите:
+  `config.load_settings`, `skills_loader.load_skills`, `tools.SEARCH_TOOLS`,
+  лишние импорты в `agent.py`. Публичный API (`config.find_resource`,
+  `config.agent_home_path`, `config.mcp_config_path`) оставлен: им пользуются
+  плагины и внешние модули, на него добавлен тест
+  `test_public_resource_helpers_stay_stable`.
+
+### Изменено
+
+- CI: матрица Python 3.10/3.13 + `node --check` для `extension.js`
+  и `selftest.js`.
+- Документация: имя папки расширения при установке симлинком —
+  `<publisher>.<name>-<version>` (`deepseek-agent.deepseek-agent-bridge-0.1.0`),
+  иначе VS Code его не увидит; в `configuration.md` описан `agent.language`.
+
 ### Добавлено
+
+**Профили: C#/.NET, Go, Rust, Ruby, C/C++ и DevOps (плюс новые навыки)**
+
+- Новые профили в `agent.config.json`: `csharp` (C#/.NET + `csharp-conventions`,
+  `dotnet`), `go`, `rust`, `ruby`, `cpp`, `devops` — всего 12 профилей вместе с
+  `php`, `python`, `frontend`, `java`, `kotlin`, `swift`.
+- Новые навыки `skills/`: `csharp-conventions`, `dotnet`, `go-conventions`,
+  `rust-conventions`, `ruby-conventions`, `cpp-conventions`, `devops` — с
+  командами сборки/тестов и правилами, которых нет в общих конвенциях.
+- Определение стека (`tools/stack.py`): C#/.NET (`*.sln`, `*.csproj`,
+  `global.json`; отдельно ASP.NET Core по SDK в csproj), C/C++ (`CMakeLists.txt`,
+  `Makefile` + исходники), контейнеры/инфраструктура (`Dockerfile`,
+  `docker-compose.yml`, `k8s/`, `terraform/`); теги для навыков выводятся и для
+  меток с символами (`C# (.NET)` → `csharp`, `cs`, `dotnet`, `net`).
+- Автолинт: правила для `.go` (`gofmt -e`) и `.rb` (`ruby -c`); для `.cs`
+  дешёвой проверки синтаксиса нет — навык `dotnet` требует `dotnet build`.
+- `config.PROFILES` больше не содержит служебных ключей `_readme`: перебор
+  профилей безопасен для внешнего кода и плагинов.
+- Тесты: определение новых стеков, «каждый навык профиля существует»,
+  «профиль грузит ровно свои навыки»; документация — `docs/configuration.md`
+  (таблица профилей).
+
+**Плагины: дополнительные инструменты из `plugins/` (`plugins_loader.py`)**
+
+- Ключ `paths.plugins_dirs` раньше только печатался в `--doctor` — плагины не
+  подключались. Теперь папки (`plugins/` проекта и агента, цепочка «проект →
+  агент») загружаются на старте: `.py`-файл с `register(api)` добавляет агенту
+  свои инструменты (`api.add_tool(...)`), видит `api.project_root`,
+  `api.settings` и `api.find_resource(...)`.
+- `dangerous=True` — инструмент плагина спрашивает подтверждение и блокируется
+  в режиме планирования; аргумент `path` проходит песочницу `safe_path`;
+  перекрыть встроенный инструмент нельзя.
+- Ошибка в плагине (исключение, нет `register`, недопустимое имя) не роняет
+  агента: сообщение печатается при старте и видно в `--doctor`.
+- Тесты: `tests/test_plugins.py`; документация — `docs/development.md`
+  («Плагины»), `docs/configuration.md`.
+- `config.find_resource()` остался в API именно для плагинов (его использует
+  `PluginAPI.find_resource`).
 
 **Мягкое планирование: `PLAN.md` → одно подтверждение → автопилот**
 

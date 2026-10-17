@@ -106,9 +106,9 @@ DEFAULTS: dict = {
         "mcp_config": ["mcp_config.json", ".mcp.json"],
         # Каталог автоснапшотов. Относительный путь считается от проекта.
         "backup_dir": ".agent-cache/backups",
-        # Дополнительные папки модулей/плагинов агента (можно указать список).
-        "plugins_dirs": ["plugins"],
-    },
+        # Папки плагинов: .py-файлы с функцией register(api) добавляют агенту
+        # свои инструменты (см. plugins_loader.py). Пусто — без плагинов.
+        "plugins_dirs": ["plugins"],    },
     # MCP: какие папки агент объявляет серверам как «корни» (roots/list).
     "mcp": {
         # Пусто = только paths.project_root. Пути можно задавать относительно
@@ -190,6 +190,11 @@ DEFAULTS: dict = {
             # Swift: -parse разбирает файл без типизации и без записи файлов.
             {"ext": [".swift"], "command": "swiftc -parse {file}",
              "label": "swiftc -parse"},
+            # Go: gofmt -e сообщает все синтаксические ошибки (на успехе печатает
+            # отформатированный текст в stdout — он не попадает в ответ модели).
+            {"ext": [".go"], "command": "gofmt -e {file}", "label": "gofmt -e"},
+            # Ruby: ruby -c — только проверка синтаксиса, без выполнения кода.
+            {"ext": [".rb"], "command": "ruby -c {file}", "label": "ruby -c"},
         ],
     },
     "tools": {
@@ -542,29 +547,14 @@ def setup(cli_project_root: str | None = None) -> Path:
     LOOP_GUARD = deep_merge(
         DEFAULTS["agent"]["loop_guard"], AGENT_CFG.get("loop_guard") or {}
     )
-    PROFILES = merged.get("profiles") or DEFAULTS["profiles"]
+    # Ключи с "_" в секции profiles — служебные пояснения конфига: в PROFILES
+    # их не держим, чтобы внешний код и плагины могли безопасно перебирать профили.
+    raw_profiles = merged.get("profiles") or DEFAULTS["profiles"]
+    PROFILES = {name: cfg for name, cfg in raw_profiles.items()
+                if not str(name).startswith("_")} or DEFAULTS["profiles"]
     API_RETRIES = int(AGENT_CFG.get("api_retries") or DEFAULTS["agent"]["api_retries"])
     SHELL_TIMEOUT = int(TOOLS_CFG.get("shell_timeout") or DEFAULTS["tools"]["shell_timeout"])
     return root
-
-
-def load_settings(path: str | os.PathLike | None = None) -> dict:
-    """Читает один конфиг и раскрывает подстановки (без проектного оверрайда)."""
-    cfg_path = Path(path) if path else CONFIG_PATH
-    merged = deep_merge(DEFAULTS, _read_json(cfg_path))
-    # ${project_root} ещё не вычислен — оставляем подстановку до второго прохода.
-    merged = expand_vars(merged, {"agent_home": str(AGENT_HOME)},
-                         keep=("project_root",))
-
-    raw_root = str((merged.get("paths") or {}).get("project_root") or "").strip()
-    root = _normalize_path(raw_root, cfg_path.parent) if raw_root else Path.cwd().resolve()
-    merged["paths"]["project_root"] = str(root)
-
-    return expand_vars(merged, {
-        "agent_home": str(AGENT_HOME),
-        "agent_dir": str(AGENT_HOME),
-        "project_root": str(root),
-    })
 
 
 # ---------- Константы (заполняются setup() при импорте) ----------
@@ -601,7 +591,7 @@ MAX_STEPS: int = 0
 API_RETRIES: int = 3
 SHELL_TIMEOUT: int = 60
 MAX_OUTPUT_TOKENS: int = 0
-STREAM: bool = True
+STREAM: bool = False
 TOP_P: float = 0.0
 
 setup()
@@ -621,7 +611,11 @@ def search_dirs(project_root: str | os.PathLike | None = None) -> list[Path]:
 
 
 def find_resource(relative: str, project_root: str | os.PathLike | None = None) -> Path | None:
-    """Ищет файл/папку сначала в проекте, затем в AGENT_HOME."""
+    """Ищет файл/папку сначала в проекте, затем в AGENT_HOME.
+
+    Публичный хелпер: используется плагинами (`plugins_loader.PluginAPI`),
+    чтобы достать свой ресурс (схему, шаблон) из папки проекта или агента.
+    """
     path = Path(relative)
     if path.is_absolute():
         return path if path.exists() else None

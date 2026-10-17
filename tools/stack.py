@@ -184,12 +184,53 @@ def detect_stack(root: str | Path = ".") -> list[str]:
     elif _has_source(root, "swift"):
         found.append("Swift")
 
+    # --- C# / .NET ---
+    if _has_any(root, ("global.json", "Directory.Build.props", "NuGet.config")) \
+            or next(root.glob("*.sln"), None) is not None \
+            or next(root.glob("*.csproj"), None) is not None:
+        project_file = next(root.glob("*.csproj"), None)
+        is_web = project_file is not None and (
+            _file_contains(project_file, "Microsoft.NET.Sdk.Web")
+            or _file_contains(project_file, "Microsoft.NET.Sdk.Razor")
+        )
+        found.append("C# (ASP.NET Core)" if is_web else "C# (.NET)")
+
+    # --- C / C++ ---
+    if _has_any(root, ("CMakeLists.txt", "meson.build")) \
+            or (_has_any(root, ("Makefile", "makefile")) and _has_source(root, "c")):
+        found.append("C/C++ (CMake)")
+    elif _has_source(root, "cpp") or _has_source(root, "cc"):
+        found.append("C/C++")
+
+    # --- Контейнеры и инфраструктура (может сочетаться с любым стеком) ---
+    if _has_any(root, ("Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+                       "compose.yaml", "Chart.yaml")) \
+            or (root / "k8s").is_dir() or (root / "terraform").is_dir():
+        found.append("DevOps (Docker)")
+
     # --- Статический фронтенд ---
     public_html = (root / "public").is_dir() and any((root / "public").glob("*.html"))
     if any(root.glob("*.html")) or public_html:
         found.append("HTML/CSS")
 
     return found
+
+
+# Теги для отдельных меток: «C# (.NET)» в нижнем регистре даёт «c» и «net»,
+# а навыкам нужны csharp/dotnet — поэтому метки с символами разбираем явно.
+_LABEL_TAGS: dict[str, set[str]] = {
+    "C# (.NET)": {"csharp", "cs", "dotnet", "net"},
+    "C# (ASP.NET Core)": {"csharp", "cs", "dotnet", "net", "aspnetcore", "web"},
+    "C/C++ (CMake)": {"c", "cpp", "cplusplus", "cmake"},
+    "C/C++": {"c", "cpp", "cplusplus"},
+    "DevOps (Docker)": {"devops", "docker", "kubernetes", "k8s", "ci"},
+    "iOS (Swift)": {"ios", "swift", "apple", "xcode"},
+    "Android (Kotlin)": {"android", "kotlin", "jvm"},
+    "Android (Java)": {"android", "java", "jvm"},
+    "Kotlin (JVM)": {"kotlin", "jvm"},
+    "Java (JVM)": {"java", "jvm"},
+    "HTML/CSS": {"html", "css", "web"},
+}
 
 
 def stack_summary(root: str | Path = ".") -> str:
@@ -209,6 +250,7 @@ def detect_tags(root: str | Path = ".") -> set[str]:
         for token in re.split(r"[^a-z0-9]+", label.lower()):
             if token:
                 tags.add(token)
+        tags |= _LABEL_TAGS.get(label, set())
     if "typescript" in tags:
         tags.update({"ts", "js"})
     if "javascript" in tags:

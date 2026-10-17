@@ -126,6 +126,24 @@ def test_python_launcher_flag_is_dropped(project, apply_config):
     assert command == f'"{config.python_exe()}" -m py_compile'
 
 
+def test_lint_output_is_decoded_as_utf8(project, apply_config):
+    """Вывод утилиты в UTF-8 не превращается в мусор (локаль Windows — cp1251)."""
+    rule = {
+        "ext": [".py"],
+        "command": ('python -c "import sys; '
+                    "sys.stderr.buffer.write('ошибка'.encode('utf-8')); "
+                    'sys.exit(1)" {file}'),
+        "label": "utf8",
+    }
+    _apply_rules(apply_config, [rule])
+    (project / "a.py").write_text("x = 1\n", encoding="utf-8")
+
+    report = linter.lint_file(project / "a.py")
+
+    assert "ОШИБКА" in report
+    assert "ошибка" in report
+
+
 def test_lint_does_not_create_pycache_in_project(project, apply_config):
     """Байткод линта не сыплется в дерево проекта: он идёт в кэш интерпретатора."""
     _apply_rules(apply_config, [PY_RULE])

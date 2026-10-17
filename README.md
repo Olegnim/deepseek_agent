@@ -86,7 +86,7 @@ python "<AGENT_HOME>\agent.py" -t "Исправь ошибки PHP в src"    # 
 |---|---|
 | `-p, --project-root` | Корень проекта (по умолчанию — папка запуска) |
 | `-t, --task` | Разовая задача; без флага — интерактивный режим |
-| `--profile <имя>` | Профиль (роль): `php`, `python`, `frontend`, `java`, `kotlin`, `swift` или свой |
+| `--profile <имя>` | Профиль (роль): `php`, `python`, `frontend`, `java`, `kotlin`, `swift`, `csharp`, `go`, `rust`, `ruby`, `cpp`, `devops` или свой |
 | `--list-profiles` | Список профилей и выход (ключ не нужен) |
 | `--doctor` | Диагностика окружения и выход (ключ не нужен) |
 | `-y, --yes` / `--no-confirm` | Без запросов подтверждения (для автоматизации) |

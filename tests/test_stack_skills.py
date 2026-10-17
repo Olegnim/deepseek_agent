@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+import config
 from skills_loader import (
     load_skill_map, load_skills_for_stack, parse_front_matter, skill_applies_to,
 )
@@ -78,6 +79,39 @@ def test_other_markers(project):
     found = stack.detect_stack(project)
 
     assert {"Go", "Rust", "Ruby", "HTML/CSS"} <= set(found)
+
+
+def test_dotnet_project(project):
+    (project / "Shop.sln").write_text("", encoding="utf-8")
+    (project / "Shop.Api.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk.Web"></Project>', encoding="utf-8")
+
+    assert stack.detect_stack(project) == ["C# (ASP.NET Core)"]
+    tags = stack.detect_tags(project)
+    assert {"csharp", "cs", "dotnet", "aspnetcore", "web"} <= tags
+
+
+def test_csharp_library_project(project):
+    (project / "Lib.csproj").write_text(
+        '<Project Sdk="Microsoft.NET.Sdk"></Project>', encoding="utf-8")
+
+    assert stack.detect_stack(project) == ["C# (.NET)"]
+    assert {"csharp", "dotnet"} <= stack.detect_tags(project)
+
+
+def test_cpp_project_with_cmake(project):
+    (project / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n", encoding="utf-8")
+
+    assert stack.detect_stack(project) == ["C/C++ (CMake)"]
+    assert {"c", "cpp", "cmake"} <= stack.detect_tags(project)
+
+
+def test_docker_stack(project):
+    (project / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    assert stack.detect_stack(project) == ["DevOps (Docker)"]
+    assert {"devops", "docker"} <= stack.detect_tags(project)
 
 
 def test_stack_of_missing_dir_is_empty(tmp_path):
@@ -173,3 +207,26 @@ def test_only_profile_list_ignores_applies_to(project):
     loaded = load_skills_for_stack(str(base), {"python"}, only={"php-conventions"})
 
     assert set(loaded) == {"php-conventions"}
+
+
+# ---------- Профили и реальные навыки ----------
+
+def test_every_profile_skill_exists():
+    """Каждый навык из профиля агента реально лежит в skills/ (ловит опечатки)."""
+    base = config.AGENT_HOME / "skills"
+    available = {p.name for p in base.iterdir() if (p / "SKILL.md").is_file()}
+
+    for name, profile in config.profiles().items():
+        missing = [skill for skill in profile.get("skills") or []
+                   if skill not in available]
+        assert not missing, f"профиль «{name}»: нет навыков {missing}"
+
+
+def test_profile_loads_exactly_its_skills():
+    """Профиль подключает ровно свой набор навыков (без лишних)."""
+    base = config.AGENT_HOME / "skills"
+    skills = set(config.PROFILES["csharp"]["skills"])
+
+    loaded = load_skills_for_stack(str(base), {"csharp", "dotnet"}, only=skills)
+
+    assert set(loaded) == skills

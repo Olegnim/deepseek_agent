@@ -42,6 +42,7 @@ import tempfile
 from pathlib import Path
 
 import config
+from . import shell as shell_module
 
 MAX_DETAIL = 1500      # сколько символов вывода утилиты отдавать модели
 LINT_TOOLS = {"write_file", "edit_file"}
@@ -185,8 +186,6 @@ def lint_file(path: str | os.PathLike) -> str | None:
             command,
             shell=True,
             capture_output=True,
-            text=True,
-            errors="replace",       # не падать на выводе утилит в другой кодировке
             timeout=timeout,
             stdin=subprocess.DEVNULL,
             cwd=str(config.PROJECT_ROOT),
@@ -197,8 +196,14 @@ def lint_file(path: str | os.PathLike) -> str | None:
     except Exception as e:  # noqa: BLE001 — линтер не должен ронять агента
         return f"линт {label}: {type(e).__name__}: {e}"
 
+    # Байты декодируем сами (shell._decode): php/node/javac пишут UTF-8, а
+    # text=True взял бы кодировку локали — на Windows кириллица в сообщении
+    # об ошибке превращалась бы в мусор.
     detail = "\n".join(
-        part.strip() for part in (r.stdout or "", r.stderr or "") if part.strip()
+        part.strip()
+        for part in (shell_module._decode(r.stdout or b""),
+                     shell_module._decode(r.stderr or b""))
+        if part.strip()
     ).strip()
 
     if r.returncode == 0:

@@ -21,9 +21,6 @@ WEB_TOOLS = {"fetch_url", "web_search"}
 GIT_TOOLS = {"git_status", "git_diff", "git_log"}
 # Изображения модели (vision.enabled в конфиге).
 VISION_TOOLS = {"read_image"}
-# Поиск/навигация по коду (tools/search.py): работают локально и отдают выжимку.
-SEARCH_TOOLS = {"search_code", "file_outline", "read_symbol",
-                "diff_files", "find_files", "project_map"}
 # Визуальная работа в редакторе: доступна, только если запущено расширение
 # VS Code (vscode-extension/) и vscode.enabled != false.
 VSCODE_TOOLS = {

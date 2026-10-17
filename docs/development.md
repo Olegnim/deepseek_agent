@@ -9,9 +9,10 @@
 ├── agent.config.json         # настройки агента (шаблон для git, без секретов)
 ├── mcp_integration.py        # клиент MCP-серверов
 ├── skills_loader.py          # загрузка навыков
+├── plugins_loader.py         # подключение плагинов (доп. инструменты из plugins/)
 ├── tools/                    # filesystem, search, digest, shell, linter, git, web, vscode, cache, snapshot, stack, loop_guard
 ├── skills/                   # встроенные навыки (навыки проекта подхватятся отдельно)
-├── plugins/                  # (опционально) доп. модули
+├── plugins/                  # (опционально) плагины: .py с функцией register(api)
 ├── .agent.config.json        # ЛОКАЛЬНЫЙ оверрайд и секреты (в git не попадает)
 ├── .vscode/tasks.json        # готовые задачи VS Code
 ├── vscode-extension/         # расширение-мост: агент открывает файлы прямо в VS Code
@@ -51,6 +52,7 @@ python -m pytest tests/test_config.py -v
 | `tests/test_loop_guard.py` | предупреждение, остановка, сброс счётчика при другом результате |
 | `tests/test_plan_mode.py` | режимы планирования, блокировка правок, автопилот после `:plan approve`, прогресс в `PLAN.md` |
 | `tests/test_stack_skills.py` | определение стека по маркерным файлам, front-matter `SKILL.md`, отбор навыков по `applies_to` и по профилю |
+| `tests/test_plugins.py` | плагины: регистрация инструментов, `dangerous`, изоляция ошибок (битый плагин не роняет агента), запрет перекрывать встроенные инструменты |
 | `tests/test_snapshot_cache.py` | снапшоты (путь, лимит `max_backups`), подсчёт и очистка `.agent-cache` |
 | `tests/test_web.py` | SSRF-фильтр адресов, преобразование HTML, разбор выдачи DuckDuckGo (без сети) |
 | `tests/test_mcp.py` | конфиг MCP, подстановки, схемы инструментов, префикс `сервер__инструмент`, ошибки вызова, roots/list |
@@ -61,3 +63,39 @@ python -m pytest tests/test_config.py -v
 Прогон должен быть полностью зелёным: известные дефекты 0.1.0 (настройки `api.*`
 при `-p`, `${project_root}` в конфиге, секция `tools.lint`, кодировка вывода git)
 исправлены — `xfail`-маркеров в тестах больше нет.
+
+## Плагины (доп. инструменты)
+
+Плагин — обычный `.py`-файл в папке `plugins/` проекта (или агента): папки
+задаются ключом `paths.plugins_dirs`, ищутся по цепочке «проект → папка агента»
+и подключаются на старте (`plugins_loader.py`). Файлы, начинающиеся с `_`,
+пропускаются.
+
+```python
+# plugins/hello.py
+def register(api):
+    def hello(**args):
+        return f"Привет, {args.get('name') or 'мир'}!"
+
+    api.add_tool(
+        name="hello",
+        description="Поздороваться с пользователем",
+        parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+        func=hello,
+    )
+```
+
+- Обработчик вызывается как `func(**args)`, результат приводится к строке и
+  проходит тот же бюджет вывода (`tools.output`), что и у встроенных
+  инструментов. Аргумент `path` проходит песочницу `safe_path`.
+- `dangerous=True` — инструмент спрашивает подтверждение (как `write_file`) и
+  блокируется в режиме планирования.
+- Перекрыть встроенный инструмент или MCP-имя нельзя: такой инструмент
+  пропускается с сообщением об ошибке.
+- В `register(api)` доступны `api.project_root`, `api.settings`,
+  `api.find_resource("schema.json")`.
+- Ошибка в плагине (исключение, нет `register`, недопустимое имя инструмента) не
+  роняет агента: она печатается при старте и видна в `--doctor`.
+
+**Плагин — это код в процессе агента**, поэтому подключайте только доверенные
+папки; ключ `paths.plugins_dirs` не должен указывать на чужие каталоги.

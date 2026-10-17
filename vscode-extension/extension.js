@@ -438,6 +438,11 @@ async function cmdDiff(args) {
   return { title };
 }
 
+/**
+ * Подсветка диапазона строк. Агент (tools/vscode.py) эту команду пока не
+ * вызывает, но она часть протокола моста (см. README расширения): её может
+ * отправить любой внешний клиент, который говорит с мостом напрямую.
+ */
 async function cmdHighlight(args) {
   const uri = toUri(args.path);
   const doc = await vscode.workspace.openTextDocument(uri);

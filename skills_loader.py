@@ -112,15 +112,6 @@ def load_skill_map(base: str) -> dict[str, str]:
     return skills
 
 
-def load_skills(base: str) -> str:
-    """Собирает содержимое всех SKILL.md одной папки в текстовый блок."""
-    blocks = [
-        f"### Skill: {name}\n{content}"
-        for name, content in load_skill_map(base).items()
-    ]
-    return "\n\n".join(blocks)
-
-
 def load_skills_for_stack(
     base: str,
     tags: set[str] | None = None,

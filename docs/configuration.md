@@ -37,8 +37,10 @@
 | `agent.profile` | Профиль (роль); пусто = авто по стеку |
 | `agent.max_steps` | Лимит шагов модели на задачу; `0` = без лимита (защита от зацикливания — `loop_guard`) |
 | `agent.instructions` | Доп. правила проекта (строка/список, попадают в промпт) |
+| `agent.language` | Язык ответов агента (подставляется в промпт: «Отвечай кратко, на {language}») |
 | `paths.project_root` | Пусто = папка запуска |
 | `paths.mcp_config` / `paths.skills_dir` / `paths.backup_dir` | Пути к MCP-конфигам / навыкам / снапшотам |
+| `paths.plugins_dirs` | Папки плагинов (`.py` с `register(api)`, доп. инструменты); пусто — плагины выключены |
 | `mcp.roots` | Папки, которые агент объявляет MCP-серверам как разрешённые (roots/list); пусто = корень проекта |
 | `lint.enabled` / `lint.rules` | Автолинт и правила (`{file}` — путь к файлу) |
 | `tools.shell_timeout` | Таймаут shell-команд, сек |
@@ -51,6 +53,42 @@
 В строках JSON работают подстановки: `${env:VAR}`, `${agent_home}`
 (`${agent_dir}`), `${project_root}`. Абсолютные пути пишите через прямые слэши
 (`D:/work/site`).
+
+## Профили (роли)
+
+Профиль — это набор навыков, который подключается модели. Выбор: `agent.profile`
+в конфиге, флаг `--profile <имя>`, команда `:profile <имя>`, список —
+`:profiles` или `--list-profiles`. Пусто/`auto` — навыки подбираются по стеку
+проекта (`applies_to` в `SKILL.md`).
+
+| Профиль | Навыки |
+|---|---|
+| `php` | `code-quality`, `php-conventions`, `php-web` |
+| `python` | `code-quality`, `python-conventions` |
+| `frontend` | `code-quality`, `web-frontend` |
+| `java` | `code-quality`, `java-conventions` |
+| `kotlin` | `code-quality`, `kotlin-conventions`, `android` |
+| `swift` | `code-quality`, `swift-conventions`, `ios` |
+| `csharp` | `code-quality`, `csharp-conventions`, `dotnet` |
+| `go` | `code-quality`, `go-conventions` |
+| `rust` | `code-quality`, `rust-conventions` |
+| `ruby` | `code-quality`, `ruby-conventions` |
+| `cpp` | `code-quality`, `cpp-conventions` |
+| `devops` | `code-quality`, `devops` |
+
+Свой профиль добавляется в секцию `profiles` файла `agent.config.json` — код
+агента менять не нужно:
+
+```json
+{
+  "profiles": {
+    "elixir": {
+      "description": "Elixir/Phoenix-разработчик",
+      "skills": ["code-quality", "elixir-conventions"]
+    }
+  }
+}
+```
 
 ## DeepSeek API
 

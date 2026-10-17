@@ -34,6 +34,7 @@
       ".mcp.json"
     ],
     "backup_dir": ".agent-cache/backups",
+    "_plugins_dirs_help": "Папки плагинов: .py-файлы с функцией register(api) добавляют агенту свои инструменты (см. plugins_loader.py и docs/development.md). Относительный путь ищется в проекте, затем в папке агента. Пустой список — плагины выключены. Плагин выполняется в процессе агента: подключайте только доверенные папки.",
     "plugins_dirs": [
       "plugins"
     ]
@@ -77,6 +78,36 @@
       "description": "Swift/iOS-разработчик (Apple-платформы)",
       "skills": ["code-quality", "swift-conventions", "ios"],
       "instructions": []
+    },
+    "csharp": {
+      "description": "C#/.NET-разработчик (ASP.NET Core, EF Core, xUnit)",
+      "skills": ["code-quality", "csharp-conventions", "dotnet"],
+      "instructions": []
+    },
+    "go": {
+      "description": "Go-разработчик (сервисы, CLI, микросервисы)",
+      "skills": ["code-quality", "go-conventions"],
+      "instructions": []
+    },
+    "rust": {
+      "description": "Rust-разработчик (cargo, tokio, CLI/сервисы)",
+      "skills": ["code-quality", "rust-conventions"],
+      "instructions": []
+    },
+    "ruby": {
+      "description": "Ruby/Rails-разработчик",
+      "skills": ["code-quality", "ruby-conventions"],
+      "instructions": []
+    },
+    "cpp": {
+      "description": "C/C++ разработчик (CMake, современный C++)",
+      "skills": ["code-quality", "cpp-conventions"],
+      "instructions": []
+    },
+    "devops": {
+      "description": "DevOps/SRE (Docker, Kubernetes, CI)",
+      "skills": ["code-quality", "devops"],
+      "instructions": []
     }
   },
   "lint": {
@@ -88,7 +119,9 @@
       { "ext": [".py"], "command": "python -m py_compile {file}", "label": "python -m py_compile" },
       { "ext": [".java"], "command": "javac -proc:only {file}", "label": "javac -proc:only" },
       { "ext": [".kt", ".kts"], "command": "kotlinc {file} -d .agent-cache/lint-kotlin", "label": "kotlinc" },
-      { "ext": [".swift"], "command": "swiftc -parse {file}", "label": "swiftc -parse" }
+      { "ext": [".swift"], "command": "swiftc -parse {file}", "label": "swiftc -parse" },
+      { "ext": [".go"], "command": "gofmt -e {file}", "label": "gofmt -e" },
+      { "ext": [".rb"], "command": "ruby -c {file}", "label": "ruby -c" }
     ]
   },
   "tools": {
