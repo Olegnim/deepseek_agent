@@ -62,7 +62,8 @@ def test_tool_call_flow_appends_result_to_dialogue(agent_module, project, monkey
 
     assert calls["calls"] == 2                    # вызов инструмента + финальный ответ
     assert messages[0]["role"] == "user"
-    assert messages[1].tool_calls[0].function.name == "read_file"
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["tool_calls"][0]["function"]["name"] == "read_file"
     assert messages[2]["role"] == "tool"
     assert messages[2]["tool_call_id"] == "call_1"
     assert "содержимое файла" in messages[2]["content"]

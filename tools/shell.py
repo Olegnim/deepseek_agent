@@ -13,11 +13,56 @@
   поэтому при таймауте убивается вся группа процессов, а не только родитель.
 """
 
+import locale
 import os
 import signal
 import subprocess
 
 import config
+from . import digest
+
+
+def _cyrillic_score(text: str) -> int:
+    """Грубая оценка «это похоже на русский текст» для выбора кодировки.
+
+    Ошибочная кодировка оставляет кириллицу кириллицей, но превращает
+    строчные буквы в заглавные («ЇаЁўҐв», «яЁштхЄ»), поэтому поощряем
+    строчные русские буквы и штрафуем заглавные.
+    """
+    cyr = [c for c in text if "а" <= c.lower() <= "я" or c.lower() == "ё"]
+    if not cyr:
+        return 0
+    return 2 * sum(1 for c in cyr if c.islower()) - len(cyr)
+
+
+def _decode(data: bytes) -> str:
+    """Декодирует вывод дочернего процесса.
+
+    Кодировка вывода не определена заранее: git/node/python пишут UTF-8,
+    встроенные команды cmd.exe (`echo`, `dir`) — OEM-кодировку (cp866),
+    а часть утилит — ANSI (cp1251). Без разбора кириллица в результатах
+    поиска превращается в «РЎРѕРІРїР°РґРµРЅРёР№…» или «ЇаЁўҐв».
+    Порядок: строгий UTF-8, затем кандидаты по «похожести на русский».
+    """
+    if not data:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+
+    candidates: list[str] = []
+    fallbacks = (locale.getpreferredencoding(False), "cp866", "cp1251")
+    for enc in dict.fromkeys(fallbacks):
+        if not enc:
+            continue
+        try:
+            candidates.append(data.decode(enc))
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if not candidates:
+        return data.decode("utf-8", errors="replace")
+    return max(candidates, key=_cyrillic_score)
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
@@ -55,8 +100,6 @@ def run_shell(command: str) -> str:
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",           # не падать на не-UTF8 выводе утилит
         stdin=subprocess.DEVNULL,   # <-- важно: не давать потомкам читать stdin
         cwd=str(working_dir) if working_dir.is_dir() else None,
     )
@@ -74,7 +117,15 @@ def run_shell(command: str) -> str:
 
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
-        return f"exit={proc.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+        # Читаем байты и декодируем сами (см. _decode): text=True взял бы
+        # кодировку локали и испортил UTF-8 вывод git/node/python.
+        out = _decode(stdout or b"")
+        err = _decode(stderr or b"")
+        result = f"exit={proc.returncode}\nSTDOUT:\n{out}\nSTDERR:\n{err}"
+        # Большой вывод (pytest, сборка, git log) не отдаём целиком: модель
+        # получает выжимку с ошибками, полный лог сохраняется в .agent-cache.
+        return digest.compress("run_shell", result,
+                               keywords=digest.keywords_from(command))
     except subprocess.TimeoutExpired:
         _kill_process_tree(proc)
         try:

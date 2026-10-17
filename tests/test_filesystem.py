@@ -156,6 +156,8 @@ def test_list_dir_marks_directories(project):
     (project / "file.txt").write_text("", encoding="utf-8")
 
     assert fs.list_dir(str(project)) == "dir/\nfile.txt"
+    assert fs.list_dir(str(project / "file.txt")).endswith("это файл, а не папка (читай его через read_file)")
+
     assert fs.list_dir(str(project / "нет")).startswith("ERROR")
 
 
@@ -183,6 +185,17 @@ def test_grep_skips_vendor_dirs(project):
 def test_grep_reports_bad_regex_and_missing_dir(tmp_path):
     assert fs.grep("([", str(tmp_path)).startswith("ERROR: некорректный regex")
     assert fs.grep("x", str(tmp_path / "нет")).startswith("ERROR")
+
+
+def test_grep_accepts_single_file(project):
+    (project / "code.py").write_text("needle = 1\nhay\n", encoding="utf-8")
+    (project / "other.py").write_text("needle = 2\n", encoding="utf-8")
+
+    # Путь к файлу — ищем только в нём, include игнорируется
+    assert fs.grep("needle", "code.py") == "code.py:1: needle = 1"
+    assert fs.grep("needle", str(project / "code.py"), include=".md") == \
+        "code.py:1: needle = 1"
+    assert fs.grep("нет-такого", "code.py") == "Совпадений не найдено"
 
 
 def test_grep_limits_results(project, monkeypatch):

@@ -173,6 +173,33 @@ def test_fetch_url_truncates_output(project, monkeypatch):
     assert "обрезано" in result
 
 
+def test_fetch_url_long_page_without_query_hints(project, monkeypatch):
+    _patch_transport(monkeypatch,
+                     "<html><body>" + "<p>длинный текст страницы</p>" * 2000
+                     + "</body></html>")
+
+    result = web.fetch_url("https://example.com")
+
+    assert "страница длинная" in result
+    assert 'query="ключевые слова"' in result
+    assert len(result) < 12000
+    saved = result.split("полный текст: ")[1].split(" — ")[0]
+    assert (project / saved).is_file()
+
+
+def test_fetch_url_excerpt_by_query(project, monkeypatch):
+    body = "".join(
+        f"<p>{'навигация меню' if i % 2 else 'используйте asyncio.gather для задач'}</p>"
+        for i in range(2000)
+    )
+    _patch_transport(monkeypatch, f"<html><body>{body}</body></html>")
+
+    result = web.fetch_url("https://example.com/doc", query="asyncio gather")
+
+    assert "asyncio.gather" in result
+    assert "фрагменты по словам" in result
+
+
 def test_fetch_url_passes_plain_text_through(project, monkeypatch):
     _patch_transport(monkeypatch, "просто текст", content_type="text/plain")
 

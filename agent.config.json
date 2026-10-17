@@ -6,8 +6,25 @@
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-flash",
     "temperature": 0.2,
+    "_thinking_help": "thinking — режим рассуждений (true/false). reasoning_effort — усилие: low / high / max (none выключает рассуждения; алиасы API minimal→low, medium/xhigh→high, ultra→max). Переключается на лету командой :think. В thinking mode temperature не действует, top_p работает в диапазоне 0.95–1.0.",
+    "thinking": true,
+    "reasoning_effort": "high",
+    "_max_tokens_help": "Лимит токенов ответа. 0 = значение по умолчанию API (8K без thinking, 64K с thinking, 128K при effort=max). Максимум 393216 (384K).",
+    "max_tokens": 0,
+    "_top_p_help": "Nucleus sampling, 0 = не передавать. У deepseek-flash действует только в thinking mode (эффективно 0.95–1.0).",
+    "top_p": 0,
+    "_stream_help": "Стриминг (stream=true): ответ печатается по мере генерации, первые токены видны сразу, но без спиннера и без markdown-форматирования (может выглядеть сырым). false (по умолчанию) — ждать ответ целиком: анимация «DeepSeek думает» и форматированный вывод. Переключается на лету командой :stream on|off.",
+    "stream": false,
     "_context_limit_help": "Лимит контекста для полосы заполнения: число или строка с суффиксом k/M (65536, \"128k\", \"1M\"). 0 = показывать только количество токенов.",
     "context_limit": "1M"
+  },
+  "vision": {
+    "_readme": "Передача изображений модели (https://api-docs.deepseek.com/guides/vision): инструмент read_image отправляет картинку как image_url (base64 data URL). Поддерживаются JPEG, PNG, GIF, WebP; формат определяется по содержимому файла.",
+    "enabled": true,
+    "_max_bytes_help": "Лимит размера файла в байтах (inline base64 в API ограничен 32 МиБ на изображение и 48 МиБ на запрос).",
+    "max_bytes": 8388608,
+    "_detail_help": "low = уменьшение до 512x512 (быстрее и дешевле), high/original/auto = оригинал.",
+    "detail": "auto"
   },
   "paths": {
     "project_root": "",
@@ -80,7 +97,23 @@
       "enabled": true,
       "timeout": 20,
       "max_chars": 20000,
-      "results": 5
+      "results": 5,
+      "excerpt_paragraphs": 8
+    },
+    "_output_help": "Бюджет вывода инструментов: столько символов результата уходит модели. Большие логи (pytest, сборка, git log, веб-страница) превращаются в выжимку — ошибки + первые/последние строки, а полный текст сохраняется в .agent-cache/output и читается через read_range/search_code.",
+    "output": {
+      "enabled": true,
+      "max_chars": 6000,
+      "head_lines": 25,
+      "tail_lines": 15,
+      "keep_files": 40,
+      "no_digest": ["read_file", "read_range"]
+    },
+    "_search_help": "Поиск по коду (search_code/file_outline/read_symbol/diff_files): инструменты работают локально и отдают выжимку вместо простыней.",
+    "search": {
+      "max_results": 60,
+      "context": 0,
+      "max_files": 5000
     }
   },
   "vscode": {

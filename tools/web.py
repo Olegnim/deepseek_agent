@@ -26,6 +26,7 @@ import urllib.request
 from html.parser import HTMLParser
 
 import config
+from . import digest
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -160,10 +161,13 @@ def _truncate(text: str, limit: int) -> str:
 
 # ---------- fetch_url ----------
 
-def fetch_url(url: str, max_chars: int = 0) -> str:
+def fetch_url(url: str, max_chars: int = 0, query: str = "") -> str:
     """Скачивает URL и возвращает текст страницы (HTML -> plain text).
 
     max_chars — ограничить вывод (0 = лимит из конфига tools.web.max_chars).
+    query — что искать на странице: вместо начала отдаются релевантные абзацы
+    (для доков и больших страниц это в разы короче и точнее). Полный текст
+    сохраняется в .agent-cache/output, его можно читать через read_range.
     """
     cfg = _web_cfg()
     if not cfg.get("enabled", True):
@@ -216,7 +220,27 @@ def fetch_url(url: str, max_chars: int = 0) -> str:
 
     if cut:
         text += f"\n\n[... страница обрезана: скачано {MAX_FETCH_BYTES} байт]"
-    return _truncate(text, limit)
+    # Явный лимит от модели — старое поведение (просто обрезка).
+    if max_chars:
+        return _truncate(text, limit)
+    # Бюджет контекста: не больше tools.output.max_chars на результат.
+    out_budget = min(limit, int(config.output_settings().get("max_chars") or limit))
+    # Задан вопрос — отдаём абзацы, где встречаются слова запроса.
+    if query.strip():
+        return digest.excerpt(text, digest.keywords_from(query),
+                              max_chars=out_budget)
+    if len(text) <= out_budget:
+        return text
+    # Длинная страница без вопроса: показываем начало (не рванную нарезку
+    # строк — в тексте страницы много навигации) и подсказываем query.
+    saved = digest.save_output("fetch_url", text)
+    tail = (f"\n\n[... страница длинная: показано начало ({out_budget} из "
+            f"{len(text)} символов). Нужны конкретные места — повтори "
+            f"fetch_url(url, query=\"ключевые слова\")")
+    if saved:
+        tail += f"; полный текст: {saved} — читай read_range(...) точечно"
+    tail += "]"
+    return text[:out_budget].rstrip() + tail
 
 
 # ---------- web_search (DuckDuckGo, без API-ключа) ----------

@@ -47,6 +47,11 @@ def read_file(path: str) -> str:
     p = Path(path)
     if not p.is_file():
         return f"ERROR: файл не найден: {path}"
+    # Бинарные изображения бесполезно отдавать текстом — их передаёт read_image.
+    from .vision import is_image_file
+    if is_image_file(str(p)):
+        return (f"Это изображение ({p.name}): текстом оно не читается. "
+                "Вызови read_image с тем же путём, чтобы показать его модели.")
     size = p.stat().st_size
     if size > MAX_READ_BYTES:
         with open(p, "r", encoding="utf-8", errors="ignore") as f:
@@ -146,6 +151,7 @@ SKIP_DIRS = {
     ".git", "node_modules", "vendor", "__pycache__", ".venv", "venv",
     ".agent-cache", ".idea", ".vscode", "dist", "build", ".next",
     ".cache", ".mypy_cache", ".pytest_cache", "coverage", ".tox",
+    "target", ".gradle", "Pods", "DerivedData", ".ruff_cache",
 }
 
 
@@ -196,8 +202,10 @@ def project_outline(root: str = ".", depth: int = 2,
 def list_dir(path: str = ".") -> str:
     """Возвращает список файлов и папок в директории."""
     p = Path(path)
+    if p.is_file():
+        return f"{path} — это файл, а не папка (читай его через read_file)"
     if not p.is_dir():
-        return f"ERROR: папка не найдена: {path}"
+        return f"ERROR: путь не найден: {path}"
     entries = []
     for item in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
         suffix = "/" if item.is_dir() else ""
@@ -205,56 +213,75 @@ def list_dir(path: str = ".") -> str:
     return "\n".join(entries) if entries else "(пусто)"
 
 
+def extensions_for(include: str) -> tuple[str, ...] | None:
+    """Фильтр расширений по аргументу include.
+
+    '' (пусто) — CODE_EXTENSIONS, '*' — без фильтра, '.php'/'php' — одно
+    расширение. Пустая строка и '*' различаются: первый — «только код»,
+    второй — «все файлы, включая .txt/.log».
+    """
+    if include == "*":
+        return None
+    if include:
+        return (include,) if include.startswith(".") else (f".{include}",)
+    return CODE_EXTENSIONS
+
+
+def iter_files(root: Path, include: str = "", max_files: int = 0) -> list[Path]:
+    """Файлы проекта под root с фильтром по расширению, без мусорных папок.
+
+    Общий обход для grep и инструментов поиска (tools/search.py): одна и та же
+    логика пропуска каталогов, чтобы результаты не расходились.
+    """
+    extensions = extensions_for(include)
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fn in sorted(filenames):
+            if extensions is not None and not fn.endswith(extensions):
+                continue
+            files.append(Path(dirpath) / fn)
+            if max_files and len(files) >= max_files:
+                return files
+    return files
+
+
 def grep(pattern: str, path: str = ".", include: str = "") -> str:
     """Ищет регулярное выражение в файлах проекта.
 
+    path — папка (обходится рекурсивно) или один файл; для файла include
+    игнорируется, ищется только в нём.
     include: суффикс расширения ('.php', 'php', '.css').
              Если пусто — ищет по всем CODE_EXTENSIONS.
              Можно указать '*' — тогда ищет по ВСЕМ файлам без фильтра.
     """
     root = Path(path)
-    if not root.is_dir():
-        return f"ERROR: папка не найдена: {path}"
+    if root.is_file():
+        files, base = [root], root.parent
+    elif root.is_dir():
+        files, base = iter_files(root, include), root
+    else:
+        return f"ERROR: путь не найден: {path}"
 
     try:
         regex = re.compile(pattern)
     except re.error as e:
         return f"ERROR: некорректный regex: {e}"
 
-    if include == "*":
-        extensions = None  # без фильтра
-    elif include:
-        extensions = (include,) if include.startswith(".") else (f".{include}",)
-    else:
-        extensions = CODE_EXTENSIONS
-
     results = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in {
-                ".git", "node_modules", "vendor", "__pycache__",
-                ".venv", "venv", ".agent-cache", ".idea", ".vscode",
-                "dist", "build", ".next", ".cache",
-                "target", ".gradle", "Pods", "DerivedData",
-            }
-        ]
-        for fn in filenames:
-            if extensions is not None and not fn.endswith(extensions):
-                continue
-            fp = Path(dirpath) / fn
-            try:
-                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                    for lineno, line in enumerate(f, 1):
-                        if regex.search(line):
-                            rel = fp.relative_to(root)
-                            results.append(f"{rel}:{lineno}: {line.rstrip()}")
-                            if len(results) >= MAX_GREP_RESULTS:
-                                results.append(
-                                    f"... (обрезано, найдено >= {MAX_GREP_RESULTS})"
-                                )
-                                return "\n".join(results)
-            except OSError:
-                continue
+    for fp in files:
+        try:
+            with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                for lineno, line in enumerate(f, 1):
+                    if regex.search(line):
+                        rel = fp.relative_to(base)
+                        results.append(f"{rel}:{lineno}: {line.rstrip()}")
+                        if len(results) >= MAX_GREP_RESULTS:
+                            results.append(
+                                f"... (обрезано, найдено >= {MAX_GREP_RESULTS})"
+                            )
+                            return "\n".join(results)
+        except OSError:
+            continue
 
     return "\n".join(results) if results else "Совпадений не найдено"

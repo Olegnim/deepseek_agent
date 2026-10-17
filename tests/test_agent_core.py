@@ -25,14 +25,17 @@ def test_safe_path_inside_project(agent_module, project):
 
 def test_shell_hint_describes_current_platform_shell(agent_module, monkeypatch):
     """Подсказка про оболочку должна соответствовать ОС, а не быть «средней»."""
-    monkeypatch.setattr(agent_module.os, "name", "nt")
+    # Подменяем именно ссылку agent.os, а не os.name у настоящего модуля os:
+    # на Windows подмена os.name ломает pathlib (Path.cwd() пробует PosixPath)
+    # и роняет teardown фикстуры project.
+    monkeypatch.setattr(agent_module, "os", SimpleNamespace(name="nt"))
     windows_hint = agent_module._shell_hint()
 
     assert "cmd.exe" in windows_hint
     assert "export" in windows_hint          # с пометкой, что команды нет
     assert "`;`" in windows_hint             # предупреждение про разделитель
 
-    monkeypatch.setattr(agent_module.os, "name", "posix")
+    monkeypatch.setattr(agent_module, "os", SimpleNamespace(name="posix"))
     posix_hint = agent_module._shell_hint()
 
     assert "/bin/sh" in posix_hint
@@ -285,6 +288,39 @@ def test_update_stats_ignores_missing_usage(agent_module):
     assert agent_module.TOKEN_STATS == before
 
 
+def test_context_bar_shows_progress_even_below_five_percent(agent_module):
+    """4% не должно выглядеть как пустой бар."""
+    saved = agent_module.CONTEXT_SIZE
+    try:
+        agent_module.app_config.CONTEXT_LIMIT = 1_000_000
+        agent_module.CONTEXT_SIZE = 41_630
+        bar = agent_module._context_bar()
+
+        assert "█" in bar                     # есть хотя бы один закрашенный блок
+        assert "(4%)" in bar
+    finally:
+        agent_module.CONTEXT_SIZE = saved
+
+
+def test_ui_status_renders_markup_instead_of_literal_tags(agent_module):
+    """Раньше в консоль попадали литералы `[green]…[/green]` и `[bold]`."""
+    from rich.console import Console
+    import io
+
+    buffer = io.StringIO()
+    saved = agent_module.console
+    try:
+        agent_module.console = Console(file=buffer, width=200,
+                                       force_terminal=False, color_system=None)
+        agent_module.ui_status("[bold]сессия:[/bold] 1 | [green]ok[/green]")
+    finally:
+        agent_module.console = saved
+
+    out = buffer.getvalue()
+    assert "[bold]" not in out and "[green]" not in out
+    assert "сессия: 1 | ok" in out
+
+
 # ---------- Регрессия: настройки API после смены проекта ----------
 
 def test_api_request_uses_model_from_project_config(agent_module, apply_config,
@@ -300,6 +336,8 @@ def test_api_request_uses_model_from_project_config(agent_module, apply_config,
             class Completions:
                 def create(self, **kwargs):
                     outer.kwargs = kwargs
+                    if kwargs.get("stream"):
+                        return iter(())          # стриминг: пустой поток чанков
                     return SimpleNamespace(choices=[], usage=None)
 
             self.chat = SimpleNamespace(completions=Completions())
@@ -317,10 +355,14 @@ def test_request_payload_shape(agent_module, monkeypatch):
     """Запрос содержит модель, сообщения, инструменты и tool_choice."""
     calls = {}
 
+    def create(**kwargs):
+        calls.update(kwargs)
+        if kwargs.get("stream"):                 # стриминг: пустой поток чанков
+            return iter(())
+        return SimpleNamespace(choices=[], usage=None)
+
     class FakeClient:
-        chat = SimpleNamespace(completions=SimpleNamespace(
-            create=lambda **kwargs: calls.update(kwargs) or SimpleNamespace(
-                choices=[], usage=None)))
+        chat = SimpleNamespace(completions=SimpleNamespace(create=create))
 
     monkeypatch.setattr(agent_module, "client", FakeClient())
 

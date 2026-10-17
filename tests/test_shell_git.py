@@ -49,6 +49,24 @@ def test_run_shell_captures_stderr(project):
     assert "STDERR" in result
 
 
+def test_decode_handles_utf8_and_windows_codepages():
+    """Вывод утилит приходит в UTF-8, OEM (cp866) или ANSI (cp1251)."""
+    assert shell._decode("привет".encode("utf-8")) == "привет"
+    assert shell._decode("привет".encode("cp866")) == "привет"
+    assert shell._decode("привет".encode("cp1251")) == "привет"
+    assert shell._decode(b"") == ""
+
+
+def test_run_shell_keeps_utf8_output_of_tools(project):
+    """git/node/python пишут UTF-8 — кириллица не должна стать мусором."""
+    result = shell.run_shell(
+        f'"{sys.executable}" -c "import sys; '
+        f'sys.stdout.buffer.write(\'привет\'.encode(\'utf-8\'))"'
+    )
+
+    assert "привет" in result
+
+
 def test_run_shell_kills_command_on_timeout(project, monkeypatch):
     monkeypatch.setattr(config, "SHELL_TIMEOUT", 1)
 

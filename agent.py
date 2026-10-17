@@ -11,8 +11,12 @@ DeepSeek CLI Agent — универсальный помощник по коду
 - шаги без лимита (agent.max_steps = 0) + loop-guard: защита от зацикливания
   на повторяющемся действии;
 - подтверждение опасных операций;
+- мягкое планирование: PLAN.md, одно подтверждение и автопилот (:plan, PLAN_MODE);
 - автоснапшоты файлов перед правкой (.agent-cache/backups/);
 - MCP-серверы через mcp_config.json;
+- возможности API: режим рассуждений (api.thinking / reasoning_effort, команда
+  :think), лимит ответа (api.max_tokens), передача изображений модели
+  (read_image, секция vision), стриминг ответа (api.stream / команда :stream);
 - интерактивный REPL с командами (:help, :tokens, :context, :restore, ...);
 - спиннер, цветной вывод, статистика токенов и размера контекста.
 
@@ -33,6 +37,7 @@ import asyncio
 import unicodedata
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from openai import OpenAI
 
@@ -51,11 +56,13 @@ try:
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
+    from rich.errors import MarkupError
     HAS_RICH = True
     console = Console()
 except ImportError:
     HAS_RICH = False
     console = None
+    MarkupError = ValueError     # чтобы except ниже работал без rich
 
 # --- UI: prompt_toolkit (опционально) ---
 try:
@@ -83,13 +90,26 @@ from config import (
     max_steps as config_max_steps,
     api_retries as config_api_retries,
     web_settings as config_web_settings,
+    output_settings as config_output_settings,
+    vision_settings as config_vision_settings,
+    thinking_enabled as config_thinking_enabled,
+    reasoning_effort as config_reasoning_effort,
+    thinking_summary as config_thinking_summary,
+    set_thinking as config_set_thinking,
+    set_reasoning_effort as config_set_reasoning_effort,
+    max_output_tokens as config_max_output_tokens,
+    api_top_p as config_api_top_p,
+    stream_enabled as config_stream_enabled,
+    set_stream as config_set_stream,
+    stream_summary as config_stream_summary,
     ask_cache_on_start as config_ask_cache_on_start,
     agent_language as config_agent_language,
     agent_instructions as config_agent_instructions,
     lint_settings as config_lint_settings,
 )
-from tools import TOOLS, REGISTRY, WEB_TOOLS, GIT_TOOLS, PATH_TOOLS, VSCODE_TOOLS
+from tools import TOOLS, REGISTRY, WEB_TOOLS, GIT_TOOLS, PATH_TOOLS, VSCODE_TOOLS, VISION_TOOLS
 from tools import linter, loop_guard
+from tools import digest as digest_tools
 from tools import vscode as vscode_tools
 from tools.filesystem import project_outline
 from tools.stack import stack_summary, detect_tags
@@ -123,7 +143,9 @@ def ui_print(text: str, style: str = "") -> None:
         if style == "markdown":
             console.print(Markdown(text))
         elif style:
-            console.print(f"[{style}]{text}[/{style}]")
+            # Text, а не markup-строка: в тексте модели/ошибки могут быть
+            # квадратные скобки ([...]) — их нельзя разбирать как разметку.
+            console.print(Text(text, style=style))
         else:
             console.print(text)
     else:
@@ -158,7 +180,20 @@ def fmt_num(n: int) -> str:
 
 
 def ui_status(status_line: str) -> None:
-    ui_print(status_line, style="dim")
+    """Строка статуса (контекст/токены): разметка + приглушённый стиль.
+
+    Раньше строка печаталась как `Text(...)`, а этот класс не разбирает
+    Rich-разметку — в терминал попадали литералы `[green]░…[/green]` и
+    `[bold]сессия:[/bold]`. Поэтому разметку разбираем явно.
+    """
+    if not console:
+        print(_strip_tags(status_line))
+        return
+    try:
+        console.print(Text.from_markup(status_line, style="dim"))
+    except MarkupError:
+        # Чужая/некорректная разметка не должна ломать вывод статуса.
+        console.print(Text(_strip_tags(status_line), style="dim"))
 
 
 def _ask(prompt: str) -> str:
@@ -196,6 +231,16 @@ def _get_client() -> OpenAI:
 # или флагом -p. Финализируется в main_async() через config.setup().
 PROJECT_ROOT = Path(app_config.PROJECT_ROOT)
 CONFIRM_MODE = True
+
+# Мягкий режим планирования. Состояния:
+#   auto     — по умолчанию: агент сам решает, спрашивает «планировать или сразу?»;
+#   planning — только план: правки файлов запрещены, кроме PLAN.md;
+#   run      — план утверждён (:plan approve): автопилот без подтверждений;
+#   off      — без планирования: выполнять сразу.
+PLAN_MODE = "auto"
+PLAN_FILE = "PLAN.md"
+CONFIRM_BEFORE_PLAN = True
+
 DANGEROUS_TOOLS = {
     "write_file", "edit_file", "run_shell",
     "filesystem__write_file", "filesystem__edit_file",
@@ -204,6 +249,13 @@ DANGEROUS_TOOLS = {
 SNAPSHOT_TOOLS = {
     "write_file", "edit_file",
     "filesystem__write_file", "filesystem__edit_file",
+}
+# Инструменты, которые меняют файлы: в режиме планирования запрещены,
+# кроме записи самого PLAN.md (run_shell оставлен — им план только исследуют).
+WRITE_TOOLS = {
+    "write_file", "edit_file",
+    "filesystem__write_file", "filesystem__edit_file",
+    "filesystem__move_file", "filesystem__create_directory",
 }
 mcp_manager: MCPManager | None = None
 
@@ -214,6 +266,7 @@ TOKEN_STATS = {
     "total": 0,
     "cache_hit": 0,
     "cache_miss": 0,
+    "reasoning": 0,
     "requests": 0,
 }
 
@@ -312,6 +365,39 @@ def confirm(tool_name: str, args: dict) -> bool:
         CONFIRM_MODE = False
         return True
     return ans == "y"
+
+
+def plan_progress() -> tuple[int, int]:
+    """Сколько задач плана отмечено сделанными и сколько их всего (по чекбоксам)."""
+    path = PROJECT_ROOT / PLAN_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return (0, 0)
+    done = len(re.findall(r"^\s*[-*]\s*\[[xX]\]", text, re.MULTILINE))
+    total = done + len(re.findall(r"^\s*[-*]\s*\[ \]", text, re.MULTILINE))
+    return (done, total)
+
+
+def _is_plan_file(args: dict) -> bool:
+    """Относится ли правка к самому файлу плана."""
+    path = args.get("path") or ""
+    return Path(str(path)).name.lower() == PLAN_FILE.lower()
+
+
+def plan_guard(name: str, args: dict) -> str:
+    """Запрет правок до утверждения плана. Возвращает текст отказа или "".
+
+    Мягкий вариант: в режиме планирования менять можно только PLAN.md,
+    остальное — после :plan approve (тогда включается автопилот).
+    """
+    if PLAN_MODE != "planning" or name not in WRITE_TOOLS or _is_plan_file(args):
+        return ""
+    return (
+        f"ERROR: режим планирования — правки файлов запрещены до утверждения "
+        f"плана ({PLAN_FILE} можно писать всегда). Составь план и попроси "
+        f"подтверждение: пользователь вводит :plan approve."
+    )
 
 
 def make_snapshot(tool_name: str, args: dict) -> None:
@@ -426,7 +512,12 @@ def _shell_hint() -> str:
             "- разделители команд: `&&` или `&` (точка с запятой `;` не работает);\n"
             "- кавычки — двойные (`cd /d \"C:\\путь с пробелами\"`);\n"
             "- POSIX-утилит (ls, rm, sed, grep, cat, which) может не быть:\n"
-            "  используй `dir`, `del`, `type`, `findstr`, `where`."
+            "  используй `dir`, `del`, `type`, `where`;\n"
+            "- для ПОИСКА по проекту терминал не нужен: бери встроенные\n"
+            "  grep/search_code/find_files — они не зависят от кодовой страницы\n"
+            "  консоли. `findstr` на UTF-8 файлах с русским текстом молча даёт\n"
+            "  пустой результат, поэтому для кириллицы его не используй\n"
+            "  (годятся `git grep` и `python -c ...`)."
         )
     return (
         "Оболочка run_shell здесь — /bin/sh (Linux/macOS), поэтому:\n"
@@ -484,6 +575,27 @@ def build_system_prompt() -> str:
             "в отдельных вкладках, с какими файлами ты работаешь;"
         )
 
+    vision_info = ""
+    if config_vision_settings().get("enabled", True):
+        vision_info = (
+            "\n- смотреть изображения и скриншоты (read_image): модель "
+            "мультимодальная — по картинке можно разобрать UI, график или "
+            "текст со скриншота; read_file для картинок бесполезен;"
+        )
+
+    thinking_info = ""
+    if config_thinking_enabled():
+        thinking_info = (
+            "\n- режим рассуждений включён "
+            f"(усилие: {config_reasoning_effort()}): сложные задачи решай "
+            "вдумчиво, простые — коротко. Переключение: :think off / :think max."
+        )
+    else:
+        thinking_info = (
+            "\n- режим рассуждений выключен: отвечай сразу, без долгих "
+            "размышлений. Включить: :think on."
+        )
+
     lint_info = ""
     lint_hints = ""
     if linter.lint_enabled():
@@ -502,6 +614,56 @@ def build_system_prompt() -> str:
 
     extra = config_agent_instructions()
     extra_block = f"\n\nДополнительные правила проекта:\n{extra}" if extra else ""
+
+    if PLAN_MODE == "planning":
+        plan_state = (
+            "\nТекущий режим: ПЛАНИРОВАНИЕ. Правки других файлов заблокированы "
+            f"(писать можно только {PLAN_FILE}) — исследуй код, составь план и "
+            "жди подтверждения: :plan approve."
+        )
+    elif PLAN_MODE == "run":
+        done, total = plan_progress()
+        progress = f" Выполнено {done} из {total}." if total else ""
+        plan_state = (
+            "\nТекущий режим: АВТОПИЛОТ. План утверждён, подтверждения выключены — "
+            "иди по шагам плана без остановок и вопросов по мелочам, отмечай "
+            "прогресс в PLAN.md (`- [x] ID`), в конце дай короткое резюме."
+            f"{progress}"
+        )
+    elif PLAN_MODE == "off":
+        plan_state = (
+            "\nТекущий режим: Планирование выключено — выполняй задачи сразу, "
+            f"{PLAN_FILE} не заводи (:plan auto — вернуть решение агенту)."
+        )
+    else:
+        plan_state = (
+            "\nТекущий режим: АВТО (по умолчанию). Мелкую задачу (одна-две правки, "
+            "ясная цель) выполняй сразу, без плана. Если задача крупная "
+            "(несколько файлов или шагов, цель размыта) — задай один короткий "
+            "вопрос в конце ответа: «Планировать (сначала план в PLAN.md) или "
+            "выполнить сразу?» — и действуй по ответу: выбрали план — составь "
+            "PLAN.md и жди :plan approve; выбрали «сразу» — выполняй."
+        )
+
+    plan_block = f"""
+Планирование (мягкий режим):
+- Мелкую задачу (одна правка, ясная цель) выполняй сразу, без плана.
+- Нетривиальную задачу (несколько файлов, неясная цель) начинай с плана:
+  1) если цель размыта — задай только те вопросы, что меняют структуру плана;
+  2) составь план и сохрани его в {PLAN_FILE}: у задачи ID и depends_on (от
+     каких задач зависит), наблюдаемое поведение (какой командой проверяется и
+     что видно в выводе) и критерий приёмки; если в проекте есть тесты, шаг
+     «написать/обновить тесты» идёт ДО реализации;
+  3) дождись ОДНОГО подтверждения — пользователь вводит :plan approve;
+  4) после подтверждения — автопилот: выполняй задачи по порядку depends_on,
+     без остановок и повторных подтверждений, отмечая шаги в {PLAN_FILE}
+     (`- [x] ID`). После каждого шага — линтер и узкие тесты, при падении
+     исправляй; в конце — широкие тесты (pytest) и короткое резюме.
+- Не переизобретай архитектуру и не расширяй план на ходу; при прерывании
+  продолжай по плану.
+- Команды пользователя: :plan on — план обязателен, :plan approve — утвердить,
+  :plan off — без плана, :plan auto — решать самому (по умолчанию).{plan_state}
+"""
 
     # Подсказка про интерпретатор нужна только там, где вообще есть Python.
     python_info = ""
@@ -539,6 +701,22 @@ def build_system_prompt() -> str:
 
     shell_hint = _shell_hint()
 
+    out_limit = int(config_output_settings().get("max_chars") or 6000)
+    economy_block = f"""
+Экономия контекста (локальная обработка вместо простыней):
+- Инструменты возвращают выжимку: бюджет ~{out_limit} символов на результат.
+  Большие выводы (pytest, сборка, git log, веб-страница) сохраняются в
+  .agent-cache/output/ — читай их точечно:
+  read_range("путь", start, end) или search_code(шаблон, ".agent-cache/output", "*").
+- Не читай файл целиком, чтобы найти одну функцию: file_outline(path) — карта
+  символов, затем read_symbol("имя", path) или read_range(...).
+- Не вываливай дерево проекта: find_files("**/*.py") или project_map(depth=2).
+- Сравнивай файлы через diff_files(a, b) — только изменения, без двух простыней.
+- Веб: fetch_url(url, query="ключевые слова") отдаёт абзацы по теме, а не всю страницу.
+- Shell-команды делай «тихими»: pytest -q, git log -5, git diff --stat,
+  git status --short, grep с -m/--include — тогда ответ умещается целиком.
+"""
+
     return f"""Ты CLI-агент для написания и правки кода.
 Ты работаешь с проектом в директории: {PROJECT_ROOT}
 Система: {platform.system()} {platform.release()}
@@ -551,9 +729,12 @@ def build_system_prompt() -> str:
 
 Твои возможности:
 - читать, писать и точечно редактировать файлы;
-- искать по коду регулярными выражениями;
+- искать по коду: grep (регулярки), search_code (сводка по файлам с контекстом),
+  file_outline (карта символов), read_symbol (тело функции по имени);
+- сравнивать файлы (diff_files), искать файлы по маске (find_files),
+  смотреть структуру проекта (project_map);
 - запускать shell-команды (тесты, сборка, линтеры);
-- смотреть состояние репозитория: git_status, git_diff, git_log;{web_info}{vscode_info}
+- смотреть состояние репозитория: git_status, git_diff, git_log;{web_info}{vscode_info}{vision_info}{thinking_info}
 - использовать инструменты MCP-серверов, если они подключены;
 - следовать правилам навыков (skills), описанных ниже.
 {mcp_info}{snapshot_info}{lint_info}{python_info}
@@ -566,10 +747,14 @@ def build_system_prompt() -> str:
 - Переименовать/заменить во всех местах файла:
   edit_file(path=..., old_text=..., new_text=..., replace_all=true)
 - Найти использования класса или функции:
-  grep("имя_функции", ".", ".php")   # третий аргумент — расширение файла
+  search_code("имя_функции", ".", include=".php")  # сводка вместо простыни
+- Понять устройство файла: file_outline("путь") — классы/функции с номерами
+  строк, затем read_symbol("имя", "путь") или read_range("путь", 400, 600).
 - Большой файл целиком не читается (обрезается) — используй
   read_range("путь", 400, 600).
-- Понять, что уже изменено: git_status(), затем git_diff(path="src/File.php"){lint_hints}
+- Понять, что уже изменено: git_status(), затем git_diff(path="src/File.php"),
+  либо diff_files("файл", "снапшот") для двух версий.{lint_hints}
+{economy_block}{plan_block}
 
 Правила:
 - Отвечай кратко, на {language}.
@@ -612,6 +797,7 @@ def build_tools_list() -> list[dict]:
     web_on = bool(config_web_settings().get("enabled", True))
     git_on = (PROJECT_ROOT / ".git").exists()
     vscode_on = vscode_tools.available()
+    vision_on = bool(config_vision_settings().get("enabled", True))
 
     seen: set[str] = set()
     deduped: list[dict] = []
@@ -626,6 +812,8 @@ def build_tools_list() -> list[dict]:
         if not git_on and name in GIT_TOOLS:
             continue
         if not vscode_on and name in VSCODE_TOOLS:
+            continue
+        if not vision_on and name in VISION_TOOLS:
             continue
         seen.add(name)
         deduped.append(tool)
@@ -693,7 +881,12 @@ def _auto_open_in_vscode(name: str, args: dict, result: str) -> str:
     return f"{result}\n{note}" if note else result
 
 
-async def execute_tool(name: str, args: dict) -> str:
+async def execute_tool(name: str, args: dict) -> str | list[dict]:
+    """Выполняет инструмент.
+
+    Обычно возвращает текст результата; инструменты с изображениями (read_image)
+    возвращают список контент-блоков — их кладёт в диалог _run_loop.
+    """
     # ---- Встроенные инструменты ----
     if name in REGISTRY:
         # Для инструментов с путями по умолчанию считаем от корня проекта,
@@ -705,20 +898,41 @@ async def execute_tool(name: str, args: dict) -> str:
                 args["path"] = str(safe_path(args["path"]))
             except ValueError as e:
                 return f"ERROR: {e}"
+        # Сравнение файлов: оба аргумента — пути внутри проекта.
+        for key in ("path_a", "path_b"):
+            if args.get(key):
+                try:
+                    args[key] = str(safe_path(args[key]))
+                except ValueError as e:
+                    return f"ERROR: {e}"
 
         # Автоснапшот перед правкой
         if name in SNAPSHOT_TOOLS:
             make_snapshot(name, args)
+
+        # Мягкое планирование: до утверждения плана меняем только PLAN.md.
+        blocked = plan_guard(name, args)
+        if blocked:
+            return blocked
 
         # Подтверждение для опасных операций
         if name in DANGEROUS_TOOLS and not confirm(name, args):
             return "Пользователь отклонил выполнение."
 
         try:
-            result = str(REGISTRY[name](**args))
+            result = REGISTRY[name](**args)
         except Exception as e:
             return f"ERROR: {type(e).__name__}: {e}"
 
+        # Контент-блоки (read_image): текст, линт и автооткрытие к ним неприменимы.
+        if isinstance(result, list):
+            return result
+
+        result = str(result)
+
+        # Единый бюджет вывода: большой результат превращается в выжимку,
+        # полный текст сохраняется в .agent-cache/output (tools/digest.py).
+        result = digest_tools.compress_result(name, result, args)
         # Автолинт: после правки файла сразу проверяем синтаксис.
         result = linter.lint_result(name, args, result)
         # Автооткрытие правленого файла в VS Code (если запущено расширение-мост).
@@ -729,9 +943,15 @@ async def execute_tool(name: str, args: dict) -> str:
         # Снапшоты работают и для MCP-правок (filesystem__write_file и т.п.).
         if name in SNAPSHOT_TOOLS and args.get("path"):
             make_snapshot(name, args)
+        # Мягкое планирование: до утверждения плана меняем только PLAN.md.
+        blocked = plan_guard(name, args)
+        if blocked:
+            return blocked
         if name in DANGEROUS_TOOLS and not confirm(name, args):
             return "Пользователь отклонил выполнение."
         mcp_result = await mcp_manager.call_tool(name, args)
+        # MCP-выводы (чтение файлов, списки, деревья) тоже укладываем в бюджет.
+        mcp_result = digest_tools.compress_result(name, str(mcp_result), args)
         return _auto_open_in_vscode(name, args, mcp_result)
 
     return f"ERROR: неизвестный инструмент {name}"
@@ -748,12 +968,15 @@ def _update_stats(usage) -> None:
     t = getattr(usage, "total_tokens", 0) or 0
     ch = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
     cm = getattr(usage, "prompt_cache_miss_tokens", 0) or 0
+    details = getattr(usage, "completion_tokens_details", None)
+    rt = (getattr(details, "reasoning_tokens", 0) or 0) if details else 0
 
     TOKEN_STATS["prompt"] += p
     TOKEN_STATS["completion"] += c
     TOKEN_STATS["total"] += t
     TOKEN_STATS["cache_hit"] += ch
     TOKEN_STATS["cache_miss"] += cm
+    TOKEN_STATS["reasoning"] += rt
     TOKEN_STATS["requests"] += 1
 
     CONTEXT_SIZE = p
@@ -766,7 +989,11 @@ def _context_bar() -> str:
     if limit <= 0:
         return f"контекст: {fmt_num(CONTEXT_SIZE)} токенов"
     pct = min(100, int(CONTEXT_SIZE * 100 / limit))
-    filled = int(pct / 5)
+    # Дробные проценты не должны выглядеть как «пустой» бар: при 4%
+    # int(4/5) давало 0 закрашенных блоков — показываем хотя бы один.
+    filled = min(20, int(round(pct * 20 / 100)))
+    if pct > 0 and filled == 0:
+        filled = 1
     bar = "█" * filled + "░" * (20 - filled)
     color = "green"
     if pct > 80:
@@ -780,18 +1007,32 @@ def _context_bar() -> str:
 
 
 def _session_stats() -> str:
+    """Основная строка статистики: без кэша и рассуждений (они — во второй)."""
     s = TOKEN_STATS
     if s["requests"] == 0:
         return "токенов пока не потрачено"
-    cache_info = ""
-    if s["cache_hit"] or s["cache_miss"]:
-        cache_info = f" | cache: {fmt_num(s['cache_hit'])} hit / {fmt_num(s['cache_miss'])} miss"
     return (
         f"[bold]сессия:[/bold] {s['requests']} зап. | "
         f"prompt: {fmt_num(s['prompt'])} | "
         f"completion: {fmt_num(s['completion'])} | "
-        f"total: {fmt_num(s['total'])}{cache_info}"
+        f"total: {fmt_num(s['total'])}"
     )
+
+
+def _cache_stats() -> str:
+    """Вторая строка статуса: кэш промпта и токены рассуждений.
+
+    Раньше всё было одной строкой ~110 символов, и терминал переносил
+    её посреди значения («… / 23 881» + «miss»).
+    """
+    s = TOKEN_STATS
+    parts: list[str] = []
+    if s["cache_hit"] or s["cache_miss"]:
+        parts.append(f"cache: {fmt_num(s['cache_hit'])} hit"
+                     f" / {fmt_num(s['cache_miss'])} miss")
+    if s.get("reasoning"):
+        parts.append(f"рассуждения: {fmt_num(s['reasoning'])}")
+    return " | ".join(parts)
 
 
 def print_stats(full: bool = False) -> None:
@@ -802,11 +1043,55 @@ def print_stats(full: bool = False) -> None:
   запросов:   {s['requests']}
   prompt:     {fmt_num(s['prompt'])}
   completion: {fmt_num(s['completion'])}
+  рассужд.:   {fmt_num(s['reasoning'])}
   total:      {fmt_num(s['total'])}
   cache hit:  {fmt_num(s['cache_hit'])}
   cache miss: {fmt_num(s['cache_miss'])}""")
-    else:
-        ui_status(_session_stats())
+        return
+    ui_status(_session_stats())
+    extra = _cache_stats()
+    if extra:
+        ui_status(extra)
+
+
+def _thinking_extra_body() -> dict:
+    """Параметры thinking mode для тела запроса.
+
+    `thinking` и `reasoning_effort` не входят в типизированный набор SDK,
+    поэтому передаём их через extra_body — так работает на любой версии
+    openai>=1.40 (см. https://api-docs.deepseek.com/guides/thinking_mode).
+    """
+    body: dict = {
+        "thinking": {"type": "enabled" if config_thinking_enabled() else "disabled"}
+    }
+    if config_thinking_enabled():
+        body["reasoning_effort"] = config_reasoning_effort()
+    return body
+
+
+def _request_kwargs(messages: list, all_tools: list) -> dict:
+    """Аргументы chat.completions.create с учётом настроек проекта.
+
+    temperature в thinking mode не действует (так и описано в API), поэтому
+    при включённых рассуждениях она просто уходит «в никуда» — это не ошибка.
+    tool_choice="auto": значения required и named в thinking mode запрещены
+    (API отвечает 400).
+    """
+    kwargs: dict = {
+        "model": app_config.MODEL,
+        "messages": messages,
+        "tools": all_tools,
+        "tool_choice": "auto",
+        "temperature": app_config.TEMPERATURE,
+        "extra_body": _thinking_extra_body(),
+    }
+    max_tokens = config_max_output_tokens()
+    if max_tokens > 0:
+        kwargs["max_tokens"] = max_tokens
+    top_p = config_api_top_p()
+    if top_p:
+        kwargs["top_p"] = min(1.0, max(0.01, top_p))
+    return kwargs
 
 
 def _api_request(messages: list, all_tools: list):
@@ -815,22 +1100,151 @@ def _api_request(messages: list, all_tools: list):
     model/temperature берутся из app_config, а не из констант, загруженных при
     импорте: если корень проекта задан флагом -p, config.setup() перечитывает
     конфиг, и запрос должен уйти с настройками именно этого проекта.
+    Режим задаёт api.stream: стриминг (текст печатается по ходу генерации)
+    или ожидание ответа целиком.
     """
+    if config_stream_enabled():
+        return _stream_request(messages, all_tools)
+
+    kwargs = _request_kwargs(messages, all_tools)
     if console:
         spinner = Spinner("dots", text=Text(" DeepSeek думает...", style="dim"))
         with Live(spinner, console=console, refresh_per_second=10, transient=True):
-            return _get_client().chat.completions.create(
-                model=app_config.MODEL, messages=messages, tools=all_tools,
-                tool_choice="auto", temperature=app_config.TEMPERATURE,
-            )
+            return _get_client().chat.completions.create(**kwargs)
     print("... DeepSeek думает", end="", flush=True)
     try:
-        return _get_client().chat.completions.create(
-            model=app_config.MODEL, messages=messages, tools=all_tools,
-            tool_choice="auto", temperature=app_config.TEMPERATURE,
-        )
+        return _get_client().chat.completions.create(**kwargs)
     finally:
         print("\r", end="")
+
+
+def _stream_write(text: str, style: str = "") -> None:
+    """Печатает кусок стриминга без перевода строки."""
+    if console:
+        renderable = Text(text, style=style) if style else text
+        console.print(renderable, end="", highlight=False, markup=bool(style),
+                      soft_wrap=True)
+    else:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def _clear_stream_hint() -> None:
+    """Стирает строку-подсказку «DeepSeek думает» перед первым токеном."""
+    print("\r" + " " * 24 + "\r", end="", flush=True)
+
+
+def _stream_request(messages: list, all_tools: list):
+    """Стриминговый запрос (stream=true): печатает ответ по мере генерации.
+
+    Возвращает объект того же вида, что и нестримовый ответ SDK
+    (choices[0].message + usage), только собранный из чанков, — поэтому
+    `_run_loop` разбирает оба режима одинаково. Накопленные tool_calls
+    склеиваются по index: имя приходит в первом чанке, аргументы — кусками.
+    """
+    kwargs = _request_kwargs(messages, all_tools)
+    kwargs["stream"] = True
+    kwargs["stream_options"] = {"include_usage": True}
+
+    content: list[str] = []
+    reasoning: list[str] = []
+    calls: dict[int, dict] = {}
+    finish: str | None = None
+    usage = None
+    hint = True
+    answering = False
+
+    print("... DeepSeek думает", end="", flush=True)
+    try:
+        for chunk in _get_client().chat.completions.create(**kwargs):
+            if hint:
+                _clear_stream_hint()
+                hint = False
+            usage = getattr(chunk, "usage", None) or usage
+            for choice in getattr(chunk, "choices", None) or []:
+                if getattr(choice, "finish_reason", None):
+                    finish = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+
+                thought = getattr(delta, "reasoning_content", None)
+                if thought:
+                    if not reasoning:
+                        _stream_write("💭 ", style="dim italic")
+                    reasoning.append(thought)
+                    _stream_write(thought, style="dim italic")
+
+                text = getattr(delta, "content", None)
+                if text:
+                    if reasoning and not answering:
+                        _stream_write("\n")
+                    content.append(text)
+                    answering = True
+                    _stream_write(text)
+
+                for call in getattr(delta, "tool_calls", None) or []:
+                    index = int(getattr(call, "index", 0) or 0)
+                    slot = calls.setdefault(index, {"id": "", "name": "", "args": []})
+                    if getattr(call, "id", None):
+                        slot["id"] = call.id
+                    function = getattr(call, "function", None)
+                    if function is not None:
+                        if getattr(function, "name", None):
+                            slot["name"] = function.name
+                        if getattr(function, "arguments", None):
+                            slot["args"].append(function.arguments)
+    finally:
+        if hint:
+            _clear_stream_hint()
+
+    message = SimpleNamespace(
+        content="".join(content) or None,
+        reasoning_content="".join(reasoning) or None,
+        tool_calls=[
+            SimpleNamespace(
+                id=slot["id"] or f"call_{index}",
+                type="function",
+                function=SimpleNamespace(
+                    name=slot["name"],
+                    arguments="".join(slot["args"]) or "{}",
+                ),
+            )
+            for index, slot in sorted(calls.items())
+        ],
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason=finish)],
+        usage=usage,
+        streamed=True,
+    )
+
+
+def _assistant_message(msg) -> dict:
+    """Сообщение ассистента для истории диалога (dict, а не объект SDK).
+
+    История уходит обратно в API и считается в :context, поэтому приводим её
+    к JSON-совместимому виду — независимо от того, пришёл ответ стримингом
+    (SimpleNamespace) или целиком (pydantic-объект SDK).
+    """
+    history: dict = {"role": "assistant", "content": msg.content or ""}
+    reasoning = getattr(msg, "reasoning_content", None)
+    if reasoning:
+        history["reasoning_content"] = reasoning
+    tool_calls = getattr(msg, "tool_calls", None) or []
+    if tool_calls:
+        history["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": getattr(call, "type", None) or "function",
+                "function": {
+                    "name": call.function.name,
+                    "arguments": call.function.arguments or "{}",
+                },
+            }
+            for call in tool_calls
+        ]
+    return history
 
 
 async def _call_model(messages: list, all_tools: list):
@@ -898,24 +1312,43 @@ async def _run_loop(messages: list) -> None:
 
         _update_stats(getattr(response, "usage", None))
 
-        msg = response.choices[0].message
+        choice = response.choices[0]
+        msg = choice.message
+        finish = getattr(choice, "finish_reason", None)
+        if finish == "length":
+            ui_info("ответ обрезан по лимиту токенов (finish_reason=length) — "
+                    "увеличь api.max_tokens или разбей задачу на части")
+            log_line("api", "finish_reason=length")
+        elif finish in ("insufficient_system_resource", "aborted"):
+            ui_info(f"генерация прервана на стороне API "
+                    f"(finish_reason={finish}) — ответ может быть неполным")
+            log_line("api", f"finish_reason={finish}")
 
         reasoning = getattr(msg, "reasoning_content", None)
-        if reasoning:
+        # При стриминге рассуждения и текст уже напечатаны по ходу генерации.
+        streamed = bool(getattr(response, "streamed", False))
+        if reasoning and not streamed:
             ui_print(f"💭 {reasoning}", style="dim italic")
 
         if not msg.tool_calls:
             print()
-            ui_print(msg.content or "(пустой ответ)", style="markdown")
+            if streamed:
+                if not msg.content:
+                    ui_print("(пустой ответ)")
+            else:
+                ui_print(msg.content or "(пустой ответ)", style="markdown")
             log_line("assistant", (msg.content or "")[:1000].replace("\n", " "))
             print()
             print_stats()
             print()
             return
 
-        messages.append(msg)
+        messages.append(_assistant_message(msg))
+        if streamed and (reasoning or msg.content):
+            print()                     # отделяем напечатанный текст от вызовов
 
         warned: list[str] = []
+        image_parts: list[dict] = []      # изображения — отдельным user-сообщением
         for call in msg.tool_calls:
             name = call.function.name
             try:
@@ -927,14 +1360,30 @@ async def _run_loop(messages: list) -> None:
             log_line("tool", f"{name}({json.dumps(args, ensure_ascii=False)[:500]})")
 
             result = await execute_tool(name, args)
+            if isinstance(result, list):
+                # Инструмент вернул контент-блоки (read_image): текст идёт в
+                # tool-сообщение, картинки — в user-сообщение ниже.
+                blocks = result
+                text = " ".join(
+                    str(b.get("text") or "") for b in blocks
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ).strip()
+                image_parts.extend(
+                    b for b in blocks
+                    if isinstance(b, dict) and b.get("type") != "text"
+                )
+                result = text or "[изображение передано модели]"
+
             ui_tool_result(name, result)
             log_line("result", str(result)[:1000].replace("\n", " "))
 
-            content = str(result)[:TOOL_RESULT_LIMIT]
-            if len(str(result)) > TOOL_RESULT_LIMIT:
-                content += (f"\n\n[... результат обрезан: показано "
-                            f"{TOOL_RESULT_LIMIT} из {len(str(result))} символов. "
-                            "Сузь запрос или читай частями через read_range.]")
+            # Последний предохранитель: если инструмент вернул больше бюджета,
+            # модель получает выжимку, а полный текст — в .agent-cache/output.
+            content = digest_tools.compress_result(name, str(result), args)
+            if len(content) > TOOL_RESULT_LIMIT:
+                content = content[:TOOL_RESULT_LIMIT] + (
+                    f"\n\n[... результат обрезан: показано {TOOL_RESULT_LIMIT} "
+                    f"из {len(content)} символов. Сузь запрос.]")
 
             messages.append({
                 "role": "tool",
@@ -960,6 +1409,18 @@ async def _run_loop(messages: list) -> None:
             messages.append({"role": "user", "content": text})
             ui_info("Похоже на цикл: прошу модель сменить подход.")
 
+        # Изображения из read_image: по документации DeepSeek они допустимы
+        # только в user-сообщениях (в system/assistant API отвечает 400),
+        # поэтому идут отдельным сообщением после всех tool-ответов.
+        if image_parts:
+            messages.append({
+                "role": "user",
+                "content": [{"type": "text",
+                             "text": "Изображения из read_image (приложены к запросу):"},
+                            *image_parts],
+            })
+            log_line("vision", f"{len(image_parts)} image part(s) sent")
+
 
 # ---------- Команды REPL ----------
 
@@ -973,12 +1434,15 @@ def cmd_help() -> None:
   [cyan]:lint [файл][/cyan]      — прогнать автолинт (php -l / node --check / ...)
   [cyan]:profile [имя][/cyan]    — показать/сменить профиль (php, python, ...)
   [cyan]:profiles[/cyan]         — список профилей (ролей) агента
+  [cyan]:think [режим][/cyan]    — thinking mode: on/off, усилие low/high/max, auto
+  [cyan]:stream [on|off][/cyan]  — стриминг ответа; по умолчанию off (спиннер + markdown)
   [cyan]:skills[/cyan]            — загруженные навыки
   [cyan]:mcp[/cyan]               — статус MCP-серверов
   [cyan]:vscode[/cyan]            — статус моста к VS Code; [cyan]:vscode start[/cyan] — поднять редактор
   [cyan]:snapshots[/cyan]         — список снапшотов
   [cyan]:restore[/cyan]           — восстановить последний снапшот
   [cyan]:auto[/cyan]              — переключить режим подтверждений
+  [cyan]:plan [on|approve|off|auto][/cyan] — планирование: план в PLAN.md → автопилот
   [cyan]:project[/cyan]           — показать корень проекта
   [cyan]:cache[/cyan]             — объём кэша (.agent-cache) и очистка
   [cyan]:log[/cyan]               — путь к логу текущей сессии
@@ -1185,11 +1649,75 @@ def cmd_profile(arg: str = "") -> bool:
     return True
 
 
+def cmd_think(arg: str = "") -> bool:
+    """Показать/сменить thinking mode: :think on|off|low|high|max|auto.
+
+    Возвращает True, если настройки изменены (нужен новый системный промпт).
+    """
+    arg = (arg or "").strip().lower()
+    if not arg or arg in ("status", "info"):
+        max_tokens = config_max_output_tokens()
+        ui_info(f"thinking: {config_thinking_summary()}  ·  "
+                f"temperature: {app_config.TEMPERATURE}  ·  "
+                f"max_tokens: {max_tokens or 'по умолчанию API'}")
+        if config_thinking_enabled():
+            ui_info("В thinking mode temperature не действует, top_p "
+                    "у deepseek-flash работает в диапазоне 0.95–1.0.")
+        else:
+            ui_info("Без рассуждений действует temperature, ответы короче и дешевле.")
+        ui_info("Переключение: :think on | off | low | high | max | auto")
+        return False
+
+    if arg in ("auto", "reset", "default", "-"):
+        config_set_thinking(None)
+        config_set_reasoning_effort(None)
+        ui_info(f"thinking: {config_thinking_summary()} (из конфига)")
+        return True
+
+    if arg in ("on", "off", "enable", "disable", "true", "false"):
+        enabled = config_set_thinking(
+            "low" if arg in ("on", "enable", "true") else "none"
+        )
+        ui_info(f"thinking: {'вкл' if enabled else 'выкл'} "
+                f"(усилие: {config_reasoning_effort()})")
+        return True
+
+    if arg in ("none", "low", "high", "max", "minimal", "medium", "xhigh", "ultra"):
+        effort = config_set_reasoning_effort(arg)
+        ui_info(f"thinking: {'вкл' if config_thinking_enabled() else 'выкл'} "
+                f"(усилие: {effort})")
+        return True
+
+    ui_error("Использование: :think  |  :think on/off  |  :think low|high|max  |  "
+             ":think auto")
+    return False
+
+
+def cmd_stream(arg: str = "") -> bool:
+    """Показать/сменить стриминг ответа: :stream on|off|auto."""
+    arg = (arg or "").strip().lower()
+    if not arg or arg in ("status", "info"):
+        ui_info(f"stream: {config_stream_summary()}")
+        ui_info("Переключение: :stream on | off | auto (значение из конфига)")
+        return False
+
+    if arg in ("auto", "reset", "default", "-"):
+        config_set_stream(None)
+    elif arg in ("on", "off", "enable", "disable", "true", "false", "yes", "no"):
+        config_set_stream(arg)
+    else:
+        ui_error("Использование: :stream  |  :stream on/off  |  :stream auto")
+        return False
+
+    ui_info(f"stream: {config_stream_summary()}")
+    return True
+
+
 def _refresh_system_prompt(messages: list) -> None:
-    """Пересобирает системный промпт в истории диалога (после смены профиля)."""
+    """Пересобирает системный промпт в истории диалога (смена профиля, :think)."""
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
         messages[0]["content"] = build_system_prompt()
-        ui_info("Системный промпт обновлён (профиль перечитан).")
+        ui_info("Системный промпт обновлён (настройки перечитаны).")
 
 
 def cmd_mcp() -> None:
@@ -1201,7 +1729,7 @@ def cmd_mcp() -> None:
         srv = info["server"]
         servers.setdefault(srv, []).append(tool_name)
     for srv, tools in servers.items():
-        ui_print(f"[bold]{srv}[/bold]: {len(tools)} инструментов", style="cyan")
+        ui_print(f"{srv}: {len(tools)} инструментов", style="bold cyan")
 
 
 def _start_vscode_bridge() -> None:
@@ -1343,6 +1871,61 @@ def cmd_auto() -> None:
     CONFIRM_MODE = not CONFIRM_MODE
     state = "ВЫКЛ" if not CONFIRM_MODE else "ВКЛ"
     ui_info(f"Подтверждения: {state}")
+
+
+def cmd_plan(arg: str = "") -> bool:
+    """Показать/сменить режим планирования: :plan [on|approve|off|auto].
+
+    auto     — по умолчанию: агент сам решает и спрашивает, если задача крупная;
+    on       — только план: правки файлов запрещены, писать можно лишь PLAN.md;
+    approve  — план утверждён: автопилот, подтверждения выключаются;
+    off      — без планирования: задачи выполняются сразу;
+    auto     — вернуть решение агенту.
+
+    Возвращает True, если режим изменился (нужен новый системный промпт).
+    """
+    global PLAN_MODE, CONFIRM_MODE, CONFIRM_BEFORE_PLAN
+    arg = (arg or "").strip().lower()
+
+    if not arg or arg in ("status", "info"):
+        done, total = plan_progress()
+        progress = f", шагов выполнено {done} из {total}" if total else ""
+        ui_info(f"планирование: {PLAN_MODE}{progress}  ·  "
+                f"план: {PROJECT_ROOT / PLAN_FILE}  ·  "
+                f"подтверждения: {'вкл' if CONFIRM_MODE else 'выкл'}")
+        ui_info("Переключение: :plan on | approve | off | auto")
+        return False
+
+    if arg in ("on", "plan", "planning"):
+        PLAN_MODE = "planning"
+        ui_info(f"Планирование ВКЛ: правки файлов заблокированы, писать можно "
+                f"только {PLAN_FILE}. Утвердить план — :plan approve.")
+        return True
+
+    if arg in ("approve", "ok", "go", "yes", "да", "run"):
+        done, total = plan_progress()
+        if not total:
+            ui_info(f"{PLAN_FILE} пока пуст или без чекбоксов — план будет "
+                    "выполняться по описанию из ответа.")
+        CONFIRM_BEFORE_PLAN = CONFIRM_MODE
+        PLAN_MODE = "run"
+        CONFIRM_MODE = False
+        ui_info(f"План утверждён: автопилот, подтверждения выключены "
+                f"({done}/{total} шагов). Завершить — :plan off.")
+        return True
+
+    if arg in ("off", "stop", "done", "exit", "auto", "default"):
+        was_run = PLAN_MODE == "run"
+        PLAN_MODE = "auto" if arg in ("auto", "default") else "off"
+        if was_run:
+            CONFIRM_MODE = CONFIRM_BEFORE_PLAN
+        ui_info(f"Планирование: {PLAN_MODE}, подтверждения: "
+                f"{'вкл' if CONFIRM_MODE else 'выкл'}.")
+        return True
+
+    ui_error("Использование: :plan  |  :plan on  |  :plan approve  |  "
+             ":plan off  |  :plan auto")
+    return False
 
 
 def cmd_doctor() -> None:
@@ -1584,6 +2167,16 @@ async def handle_command(cmd: str, messages: list) -> bool:
             _refresh_system_prompt(messages)
     elif c == ":profiles":
         cmd_profiles()
+    elif c == ":think":
+        if cmd_think():
+            _refresh_system_prompt(messages)
+    elif c.startswith(":think "):
+        if cmd_think(c.split(None, 1)[1]):
+            _refresh_system_prompt(messages)
+    elif c == ":stream":
+        cmd_stream()
+    elif c.startswith(":stream "):
+        cmd_stream(c.split(None, 1)[1])
     elif c == ":mcp":
         cmd_mcp()
     elif c == ":vscode":
@@ -1596,6 +2189,12 @@ async def handle_command(cmd: str, messages: list) -> bool:
         cmd_restore()
     elif c == ":auto":
         cmd_auto()
+    elif c == ":plan":
+        if cmd_plan():
+            _refresh_system_prompt(messages)
+    elif c.startswith(":plan "):
+        if cmd_plan(c.split(None, 1)[1]):
+            _refresh_system_prompt(messages)
     elif c == ":project":
         ui_info(f"Проект: {PROJECT_ROOT}")
     elif c == ":cache":
@@ -1756,6 +2355,8 @@ async def main_async(args) -> None:
     ui_print(f"[bold]DeepSeek Agent[/bold]  ·  проект: [cyan]{PROJECT_ROOT}[/cyan]")
     ui_print(f"                ·  модель: [cyan]{app_config.MODEL}[/cyan]  "
              f"·  подтверждения: [cyan]{'выкл' if not CONFIRM_MODE else 'вкл'}[/cyan]")
+    if PLAN_MODE != "auto":
+        ui_info(f"планирование: {PLAN_MODE} ({PLAN_FILE})")
     ui_info(f"агент: {agent_home()}")
     try:
         ui_info(f"стек проекта: {stack_summary(PROJECT_ROOT)}  ·  "
@@ -1772,6 +2373,9 @@ async def main_async(args) -> None:
         else:
             ui_info("профиль: авто (навыки по стеку проекта) "
                     "· сменить: --profile <имя> или :profile <имя>")
+    ui_info(f"thinking mode: {config_thinking_summary()}  ·  "
+            f"max_tokens: {config_max_output_tokens() or 'по умолчанию API'}  "
+            "· сменить: :think")
     try:
         skill_names = list(project_skills_map())
     except Exception:
